@@ -960,6 +960,14 @@ if(BUILD_TESTS)
     target_link_libraries(test_masstree mako ${TEST_LINK_LIBS} ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES} pthread)
     add_test(NAME test_masstree COMMAND test_masstree)
 
+    # Sundial Protocol unit tests (Phase 1)
+    # Note: This test is self-contained and doesn't require the mako library
+    add_executable(test_sundial test/test_sundial.cc)
+    target_include_directories(test_sundial PRIVATE ${TEST_INCLUDE_DIRS} ${GTEST_INCLUDE_DIRS})
+    target_compile_options(test_sundial PRIVATE ${TEST_COMPILE_OPTIONS})
+    target_link_libraries(test_sundial ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES} pthread)
+    add_test(NAME test_sundial COMMAND test_sundial)
+
     # Masstree performance benchmark (on-demand JSON output)
     add_executable(masstree_perf test/masstree_perf.cc)
     target_include_directories(masstree_perf PRIVATE ${TEST_INCLUDE_DIRS})
@@ -1100,7 +1108,7 @@ if(BUILD_TESTS)
     # Add a convenience target to run all tests
     add_custom_target(run_tests
         COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-        DEPENDS test_marshal test_rpc test_future test_masstree test_reactor test_rpc_extended test_reactor_extended rpcbench simpleTransaction simplePaxos shard1ReplicationSimple  # test_alock removed
+        DEPENDS test_marshal test_rpc test_future test_masstree test_sundial test_reactor test_rpc_extended test_reactor_extended rpcbench simpleTransaction simplePaxos shard1ReplicationSimple  # test_alock removed
         COMMENT "Running all RRR tests"
     )
 
@@ -1126,6 +1134,7 @@ if(BUILD_TESTS)
     # message(STATUS "  - test_alock: Atomic lock tests")  # Commented out due to crashes
     message(STATUS "  - test_future: Future/async operation tests")
     message(STATUS "  - test_masstree: Core Masstree b-tree regression tests")
+    message(STATUS "  - test_sundial: Sundial protocol unit tests (Phase 1)")
     message(STATUS "  - test_reactor: Reactor/event system tests")
     message(STATUS "  - test_reactor_extended: Extended reactor tests (events, coroutines, load)")
     message(STATUS "  - rpcbench: RPC performance benchmark test")

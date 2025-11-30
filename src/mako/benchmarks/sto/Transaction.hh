@@ -20,6 +20,7 @@
 #include "benchmarks/sto/Interface.hh"
 #include "benchmarks/sto/sync_util.hh"
 #include "benchmarks/benchmark_config.h"
+#include "benchmarks/sto/SundialConfig.hh"
 
 #ifndef STO_PROFILE_COUNTERS
 #define STO_PROFILE_COUNTERS 0
@@ -500,6 +501,16 @@ private:
 #endif
         TXP_INCREMENT(txp_total_starts);
         state_ = s_in_progress;
+        
+#if SUNDIAL_ENABLED
+        // Initialize Sundial fields
+        sundial_start_ts_ = sundial::get_current_timestamp();
+        sundial_max_read_wts_ = 0;
+        sundial_max_write_rts_ = 0;
+        sundial_commit_ts_ = 0;
+        sundial_read_only_ = true;  // Assume read-only until we see a write
+        SUNDIAL_LOG("Transaction started with sundial_start_ts=%lu", sundial_start_ts_);
+#endif
     }
 
 #if TRANSACTION_HASHTABLE
@@ -827,6 +838,83 @@ public:
     // The maximal timestamp received for this transaction in its readSet
     mutable uint32_t maxTimestampReadSet;
     mutable unordered_map<uint64_t, vector<uint64_t>> rollbacks_tracker; // <time in ms, shard clock of shard-0>
+    
+    // ============================================================================
+    // Sundial Protocol Fields
+    // ============================================================================
+    
+    // Transaction's start timestamp (used for Wait-Die ordering)
+    mutable sundial::timestamp_t sundial_start_ts_;
+    
+    // Maximum wts observed in the read set (for commit_ts calculation)
+    mutable sundial::timestamp_t sundial_max_read_wts_;
+    
+    // Maximum rts observed in the write set (for commit_ts calculation)
+    mutable sundial::timestamp_t sundial_max_write_rts_;
+    
+    // Computed commit timestamp
+    mutable sundial::timestamp_t sundial_commit_ts_;
+    
+    // Flag indicating this is a read-only transaction (for fast path)
+    mutable bool sundial_read_only_;
+    
+    /**
+     * Update the maximum wts observed in the read set
+     * Called during transGet
+     */
+    void sundial_update_max_read_wts(sundial::timestamp_t wts) {
+        if (wts > sundial_max_read_wts_) {
+            sundial_max_read_wts_ = wts;
+        }
+    }
+    
+    /**
+     * Update the maximum rts observed in the write set
+     * Called during transPut when acquiring write intent
+     */
+    void sundial_update_max_write_rts(sundial::timestamp_t rts) {
+        if (rts > sundial_max_write_rts_) {
+            sundial_max_write_rts_ = rts;
+        }
+    }
+    
+    /**
+     * Get the Sundial start timestamp for this transaction
+     */
+    sundial::timestamp_t sundial_get_start_ts() const {
+        return sundial_start_ts_;
+    }
+    
+    /**
+     * Compute the commit timestamp based on Sundial rules:
+     * commit_ts = max(max_wts_in_read_set + 1, max_rts_in_write_set + 1)
+     */
+    sundial::timestamp_t sundial_compute_commit_ts() const {
+        sundial_commit_ts_ = sundial::compute_commit_ts(
+            sundial_max_read_wts_, sundial_max_write_rts_);
+        return sundial_commit_ts_;
+    }
+    
+    /**
+     * Get the computed commit timestamp
+     */
+    sundial::timestamp_t sundial_get_commit_ts() const {
+        return sundial_commit_ts_;
+    }
+    
+    /**
+     * Check if this transaction is read-only
+     */
+    bool sundial_is_read_only() const {
+        return sundial_read_only_;
+    }
+    
+    /**
+     * Mark this transaction as having writes
+     */
+    void sundial_mark_has_writes() {
+        sundial_read_only_ = false;
+    }
 
 private:
     enum {

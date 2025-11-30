@@ -6,6 +6,7 @@
 #include "Interface.hh"
 #include "Packer.hh"
 #include "compiler.hh"
+#include "SundialConfig.hh"
 
 class TransProxy;
 
@@ -188,6 +189,46 @@ class TransItem {
         return extra;
     }
 
+    // ============================================================================
+    // Sundial Lease Tracking Methods
+    // ============================================================================
+    
+    /**
+     * Get the observed wts at read time
+     * Used for validation: check that wts hasn't changed since we read
+     */
+    sundial::timestamp_t sundial_observed_wts() const {
+        return sundial_wts_;
+    }
+    
+    /**
+     * Set the observed wts at read time
+     */
+    void set_sundial_observed_wts(sundial::timestamp_t wts) {
+        sundial_wts_ = wts;
+    }
+    
+    /**
+     * Get the observed rts at read time
+     */
+    sundial::timestamp_t sundial_observed_rts() const {
+        return sundial_rts_;
+    }
+    
+    /**
+     * Set the observed rts at read time
+     */
+    void set_sundial_observed_rts(sundial::timestamp_t rts) {
+        sundial_rts_ = rts;
+    }
+    
+    /**
+     * Check if this item has Sundial metadata set
+     */
+    bool has_sundial_metadata() const {
+        return sundial_wts_ != 0 || sundial_rts_ != 0;
+    }
+
 private:
     ownerstore_type s_;
     // this word must be unique (to a particular item) and consistently ordered across transactions
@@ -195,6 +236,10 @@ private:
     void* rdata_;
     void* wdata_;
     std::string extra;
+    
+    // Sundial lease tracking: observed timestamps at access time
+    sundial::timestamp_t sundial_wts_ = 0;  // Observed write timestamp
+    sundial::timestamp_t sundial_rts_ = 0;  // Observed read timestamp
 
     void __rm_flags(flags_type flags) {
         s_ = s_ & ~flags;

@@ -18,6 +18,7 @@
 #include "lib/common.h"
 #include "common.hh"
 #include "stdlib.h"
+#include "SundialConfig.hh"
 
 #define RCU 1
 #define ABORT_ON_WRITE_READ_CONFLICT 0
@@ -156,6 +157,29 @@ public:
       if(!atomicRead(e, elem_vers, retval)){ // atomicRead might throw an error as well
         return false;
       }
+      
+#if SUNDIAL_ENABLED
+      // Sundial: Record observed wts and rts at read time for later validation
+      // The wts tells us which version we read; if wts changes before commit,
+      // we know the tuple was overwritten and must abort
+      sundial::timestamp_t observed_wts = e->get_wts();
+      sundial::timestamp_t observed_rts = e->get_rts();
+      
+      // Store in TransItem for commit-time validation
+      item.item().set_sundial_observed_wts(observed_wts);
+      item.item().set_sundial_observed_rts(observed_rts);
+      
+      // Track max wts in read set for commit timestamp calculation
+      // This is done in the Transaction object
+      if (TThread::txn) {
+        TThread::txn->sundial_update_max_read_wts(observed_wts);
+      }
+      
+      SUNDIAL_STAT_INC(reads);
+      SUNDIAL_LOG("transGet: key read, observed wts=%lu, rts=%lu", 
+                  observed_wts, observed_rts);
+#endif
+      
       item.observe(tversion_type(elem_vers));
       if (TThread::is_multiversion())
         return MultiVersionValue::mvGET(retval, (char*)e->data(), TThread::txn->get_current_term(), sync_util::sync_logger::hist_timestamp);
@@ -532,9 +556,31 @@ public:
 
     bool lock(TransItem& item, Transaction& txn) override {
         versioned_value* vv = item.key<versioned_value*>();
+        
+#if SUNDIAL_ENABLED
+        // Sundial: Also acquire the Sundial lock for write-write conflict tracking
+        int my_thread_id = txn.threadid();
+        
+        // Try to acquire Sundial lock (for Wait-Die tracking)
+        if (!vv->try_sundial_lock(my_thread_id)) {
+          // Lock is held by another transaction
+          // Check if we should wait or abort (Wait-Die)
+          sundial::thread_id_t holder = vv->get_lock_owner();
+          sundial::timestamp_t my_ts = txn.sundial_get_start_ts();
+          
+          // For now, we abort on lock conflict (conservative approach)
+          // In a full implementation, older transactions would wait
+          SUNDIAL_LOG("lock: Sundial lock conflict, thread %d vs holder %d", 
+                      my_thread_id, holder);
+          return false;
+        }
+        
+        SUNDIAL_LOG("lock: Acquired Sundial lock for thread %d", my_thread_id);
+#endif
+        
         return txn.try_lock(item, vv->version());
     }
-  bool check(TransItem& item, Transaction&) override {
+  bool check(TransItem& item, Transaction& txn) override {
     if (is_inter(item)) {
       auto n = untag_inter(item.key<leaf_type*>());
       auto cur_version = n->full_version_value();
@@ -547,6 +593,38 @@ public:
     //if (!valid) Warning("fail to check validity");
     if (!valid)
       return false;
+    
+#if SUNDIAL_ENABLED
+    // Sundial validation: Check that wts hasn't changed since we read the tuple
+    // This ensures no intervening write occurred
+    if (item.has_sundial_metadata()) {
+      sundial::timestamp_t observed_wts = item.sundial_observed_wts();
+      sundial::timestamp_t current_wts = e->get_wts();
+      
+      SUNDIAL_STAT_INC(wts_validations);
+      if (current_wts != observed_wts) {
+        // Another transaction has written to this tuple since we read it
+        SUNDIAL_STAT_INC(wts_conflicts);
+        SUNDIAL_LOG("Sundial check failed: wts changed from %lu to %lu", 
+                    observed_wts, current_wts);
+        return false;
+      }
+      
+      // For read-write validation, we also need to check if we can extend
+      // the lease to our commit timestamp
+      if (item.has_write()) {
+        // Get commit_ts from the transaction
+        sundial::timestamp_t commit_ts = txn.sundial_get_commit_ts();
+        sundial::timestamp_t current_rts = e->get_rts();
+        
+        // If commit_ts > current_rts, we need to extend the lease
+        // This is done in the install phase
+        SUNDIAL_LOG("Sundial check (write): commit_ts=%lu, current_rts=%lu", 
+                    commit_ts, current_rts);
+      }
+    }
+#endif
+    
     auto ret = TransactionTid::check_version(e->version(), read_version);
     //if (!ret) Warning("fail to check version");
     return ret;
@@ -603,6 +681,31 @@ public:
           e->set_length(v.length());
         }
     }
+    
+#if SUNDIAL_ENABLED
+    // Sundial: Update wts and rts on commit
+    // wts = commit_ts (marks when this write was committed)
+    // rts = commit_ts (lease starts from commit time)
+    sundial::timestamp_t commit_ts = t.sundial_get_commit_ts();
+    if (commit_ts == 0) {
+      // Compute commit_ts if not already done
+      commit_ts = t.sundial_compute_commit_ts();
+    }
+    
+    // Set the write timestamp to our commit timestamp
+    e->set_wts(commit_ts);
+    
+    // Set rts to at least commit_ts (the lease extends from here)
+    sundial::timestamp_t current_rts = e->get_rts();
+    if (commit_ts > current_rts) {
+      e->set_rts(commit_ts);
+    }
+    
+    SUNDIAL_STAT_INC(commits);
+    SUNDIAL_LOG("install: setting wts=%lu, rts=%lu for item", 
+                commit_ts, e->get_rts());
+#endif
+    
     if (Opacity)  // false
       TransactionTid::set_version(e->version(), t.commit_tid());
     else if (isInsert) {  // insert
@@ -620,10 +723,31 @@ public:
   }
 
   void unlock(TransItem& item) override {
-      unlock(item.key<versioned_value*>());
+      versioned_value* vv = item.key<versioned_value*>();
+      
+#if SUNDIAL_ENABLED
+      // Sundial: Release the Sundial lock
+      int my_thread_id = TThread::id();
+      vv->sundial_unlock(my_thread_id);
+      SUNDIAL_LOG("unlock: Released Sundial lock for thread %d", my_thread_id);
+#endif
+      
+      unlock(vv);
   }
 
   void cleanup(TransItem& item, bool committed) override {
+#if SUNDIAL_ENABLED
+      // Sundial: Ensure Sundial lock is released on cleanup (especially on abort)
+      if (!committed && !is_inter(item)) {
+        versioned_value* vv = item.key<versioned_value*>();
+        int my_thread_id = TThread::id();
+        if (vv->is_locked_by(my_thread_id)) {
+          vv->sundial_unlock(my_thread_id);
+          SUNDIAL_LOG("cleanup: Released Sundial lock on abort for thread %d", my_thread_id);
+        }
+      }
+#endif
+      
       if (!committed && has_insert(item)) { // abort and for the insert value
         // we don't really need to deal with multi-version in this phase
         key_write_value_type& stdstr = item.template write_value<key_write_value_type>();
@@ -708,6 +832,53 @@ protected:
       Sto::abort();
       return false;
     }
+    
+#if SUNDIAL_ENABLED
+    // Sundial: Check for write-write conflicts using Wait-Die 2PL
+    int my_thread_id = TThread::id();
+    
+    // Check if tuple is locked by another transaction
+    if (e->is_locked_by_other(my_thread_id)) {
+      sundial::thread_id_t lock_holder = e->get_lock_owner();
+      
+      // Apply Wait-Die: compare transaction start timestamps
+      // We use thread IDs as a proxy for transaction age (lower ID = older)
+      // In a real implementation, we'd use actual transaction timestamps
+      if (TThread::txn) {
+        sundial::timestamp_t my_ts = TThread::txn->sundial_get_start_ts();
+        // For Wait-Die, we need the lock holder's timestamp
+        // Since we don't have it stored, we use a simple heuristic:
+        // If our thread ID is lower (we started earlier in the system),
+        // we wait; otherwise we abort (die)
+        // TODO: Store transaction timestamps with locks for proper Wait-Die
+        
+        // For now, just abort on write-write conflict (conservative approach)
+        // This will be refined in Phase 2 with proper Wait-Die
+        SUNDIAL_STAT_INC(lock_conflicts);
+        SUNDIAL_LOG("Write-write conflict detected: thread %d vs holder %d, aborting", 
+                    my_thread_id, lock_holder);
+        Sto::abort();
+        return false;
+      }
+    }
+    
+    // Track the rts for commit timestamp calculation
+    sundial::timestamp_t observed_rts = e->get_rts();
+    if (TThread::txn) {
+      TThread::txn->sundial_update_max_write_rts(observed_rts);
+      TThread::txn->sundial_mark_has_writes();
+      
+      // Also store observed wts for later validation
+      sundial::timestamp_t observed_wts = e->get_wts();
+      item.item().set_sundial_observed_wts(observed_wts);
+      item.item().set_sundial_observed_rts(observed_rts);
+    }
+    
+    SUNDIAL_STAT_INC(writes);
+    SUNDIAL_LOG("handlePutFound: key write, observed wts=%lu, rts=%lu", 
+                e->get_wts(), observed_rts);
+#endif
+
 #if READ_MY_WRITES
     if (has_delete(item)) {
       // delete-then-insert == update (technically v# would get set to 0, but this doesn't matter

@@ -12,6 +12,7 @@
 #include "StringWrapper.hh"
 #include "versioned_value.hh"
 #include "stuffed_str.hh"
+#include "SundialConfig.hh"
 
 typedef stuffed_str<uint64_t> versioned_str;
 
@@ -55,4 +56,14 @@ struct versioned_str_struct : public versioned_str {
   inline void deallocate_rcu(threadinfo& ti) {
     ti.deallocate_rcu(this, this->capacity() + sizeof(versioned_str_struct), memtag_value);
   }
+  
+  // ============================================================================
+  // Sundial Lease Methods (inherited from versioned_str/stuffed_str)
+  // These are already available via inheritance, but we add explicit wrappers
+  // for clarity and to match versioned_value_struct interface
+  // ============================================================================
+  
+  // Note: get_wts(), set_wts(), get_rts(), set_rts(), extend_rts(),
+  // get_lock_owner(), try_sundial_lock(), sundial_unlock(),
+  // is_locked_by_other(), is_locked_by() are all inherited from stuffed_str
 };

@@ -1,5 +1,7 @@
 #pragma once
 #include "string_base.hh"
+#include "SundialConfig.hh"
+#include <atomic>
 
 template <typename Stuff> 
 // Stuff -> uint64_t
@@ -113,9 +115,65 @@ public:
     return stuff_;
   }
 
+  // ============================================================================
+  // Sundial Lease Methods
+  // ============================================================================
+  
+  inline sundial::timestamp_t get_wts() const {
+    return wts_.load(std::memory_order_acquire);
+  }
+  
+  inline void set_wts(sundial::timestamp_t ts) {
+    wts_.store(ts, std::memory_order_release);
+  }
+  
+  inline sundial::timestamp_t get_rts() const {
+    return rts_.load(std::memory_order_acquire);
+  }
+  
+  inline void set_rts(sundial::timestamp_t ts) {
+    rts_.store(ts, std::memory_order_release);
+  }
+  
+  inline sundial::timestamp_t extend_rts(sundial::timestamp_t new_rts) {
+    sundial::timestamp_t current_rts = rts_.load(std::memory_order_acquire);
+    while (new_rts > current_rts) {
+      if (rts_.compare_exchange_weak(current_rts, new_rts, 
+          std::memory_order_acq_rel, std::memory_order_acquire)) {
+        return new_rts;
+      }
+    }
+    return current_rts;
+  }
+  
+  inline sundial::thread_id_t get_lock_owner() const {
+    return lock_owner_.load(std::memory_order_acquire);
+  }
+  
+  inline bool try_sundial_lock(sundial::thread_id_t thread_id) {
+    sundial::thread_id_t expected = sundial::NO_LOCK_OWNER;
+    return lock_owner_.compare_exchange_strong(expected, thread_id,
+        std::memory_order_acq_rel, std::memory_order_acquire);
+  }
+  
+  inline void sundial_unlock(sundial::thread_id_t thread_id) {
+    sundial::thread_id_t expected = thread_id;
+    lock_owner_.compare_exchange_strong(expected, sundial::NO_LOCK_OWNER,
+        std::memory_order_acq_rel, std::memory_order_acquire);
+  }
+  
+  inline bool is_locked_by_other(sundial::thread_id_t my_thread_id) const {
+    sundial::thread_id_t owner = lock_owner_.load(std::memory_order_acquire);
+    return owner != sundial::NO_LOCK_OWNER && owner != my_thread_id;
+  }
+  
+  inline bool is_locked_by(sundial::thread_id_t thread_id) const {
+    return lock_owner_.load(std::memory_order_acquire) == thread_id;
+  }
+
 private:
   stuffed_str(const Stuff& stuff, uint32_t size, uint32_t capacity, const char *buf) :
-    stuff_(stuff), size_(size), capacity_(capacity) {
+    stuff_(stuff), size_(size), capacity_(capacity), wts_(0), rts_(0), lock_owner_(sundial::NO_LOCK_OWNER) {
     memcpy(buf_, buf, size);
     flex_buf_ = buf_; // initialize the dynamic pointer, initialize once
   }
@@ -124,5 +182,11 @@ private:
   uint32_t size_;
   uint32_t capacity_;
   char *flex_buf_;
+  
+  // Sundial lease fields
+  std::atomic<sundial::timestamp_t> wts_;
+  std::atomic<sundial::timestamp_t> rts_;
+  std::atomic<sundial::thread_id_t> lock_owner_;
+  
   char buf_[0]; // zero-length arrays in GNU C
 };
