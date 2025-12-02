@@ -35,6 +35,7 @@ struct SundialTuple {
     std::atomic<sundial::timestamp_t> wts_{0};
     std::atomic<sundial::timestamp_t> rts_{0};
     std::atomic<sundial::thread_id_t> lock_owner_{sundial::NO_LOCK_OWNER};
+    std::atomic<sundial::timestamp_t> lock_holder_ts_{0};  // Phase 2a: Lock holder's timestamp
     
     // Lease getters/setters
     sundial::timestamp_t get_wts() const {
@@ -64,21 +65,32 @@ struct SundialTuple {
         return current_rts;
     }
     
-    // Lock operations
+    // Lock operations (Phase 2a: with timestamp support)
     sundial::thread_id_t get_lock_owner() const {
         return lock_owner_.load(std::memory_order_acquire);
     }
     
-    bool try_sundial_lock(sundial::thread_id_t thread_id) {
+    sundial::timestamp_t get_lock_holder_ts() const {
+        return lock_holder_ts_.load(std::memory_order_acquire);
+    }
+    
+    bool try_sundial_lock(sundial::thread_id_t thread_id, 
+                          sundial::timestamp_t txn_start_ts = 0) {
         sundial::thread_id_t expected = sundial::NO_LOCK_OWNER;
-        return lock_owner_.compare_exchange_strong(expected, thread_id,
-            std::memory_order_acq_rel, std::memory_order_acquire);
+        if (lock_owner_.compare_exchange_strong(expected, thread_id,
+            std::memory_order_acq_rel, std::memory_order_acquire)) {
+            lock_holder_ts_.store(txn_start_ts, std::memory_order_release);
+            return true;
+        }
+        return false;
     }
     
     void sundial_unlock(sundial::thread_id_t thread_id) {
         sundial::thread_id_t expected = thread_id;
-        lock_owner_.compare_exchange_strong(expected, sundial::NO_LOCK_OWNER,
-            std::memory_order_acq_rel, std::memory_order_acquire);
+        if (lock_owner_.compare_exchange_strong(expected, sundial::NO_LOCK_OWNER,
+            std::memory_order_acq_rel, std::memory_order_acquire)) {
+            lock_holder_ts_.store(0, std::memory_order_release);
+        }
     }
     
     bool is_locked_by_other(sundial::thread_id_t my_thread_id) const {
@@ -88,6 +100,18 @@ struct SundialTuple {
     
     bool is_locked_by(sundial::thread_id_t thread_id) const {
         return lock_owner_.load(std::memory_order_acquire) == thread_id;
+    }
+    
+    // Get lock info atomically (for Wait-Die decisions)
+    bool get_lock_info(sundial::thread_id_t& out_owner,
+                       sundial::timestamp_t& out_holder_ts) const {
+        out_owner = lock_owner_.load(std::memory_order_acquire);
+        if (out_owner == sundial::NO_LOCK_OWNER) {
+            out_holder_ts = 0;
+            return false;
+        }
+        out_holder_ts = lock_holder_ts_.load(std::memory_order_acquire);
+        return true;
     }
 };
 
@@ -658,6 +682,171 @@ TEST_F(WaitDiePolicyTest, YoungerTransactionShouldDie) {
 TEST_F(WaitDiePolicyTest, SameAgeTransactionShouldDie) {
     // Same timestamp - to avoid deadlock, should die
     EXPECT_FALSE(sundial::should_wait(100, 100));
+}
+
+// ============================================================================
+// Phase 2a: Wait-Die with Timestamp Support Tests
+// ============================================================================
+
+class WaitDieTimestampTest : public ::testing::Test {
+protected:
+    SundialTuple tuple_;
+    
+    void SetUp() override {
+        sundial::get_sundial_stats().reset();
+    }
+};
+
+TEST_F(WaitDieTimestampTest, LockStoresTimestamp) {
+    sundial::thread_id_t thread1 = 1;
+    sundial::timestamp_t ts1 = 100;
+    
+    // Acquire lock with timestamp
+    EXPECT_TRUE(tuple_.try_sundial_lock(thread1, ts1));
+    
+    // Verify timestamp is stored
+    EXPECT_EQ(tuple_.get_lock_owner(), thread1);
+    EXPECT_EQ(tuple_.get_lock_holder_ts(), ts1);
+}
+
+TEST_F(WaitDieTimestampTest, UnlockClearsTimestamp) {
+    sundial::thread_id_t thread1 = 1;
+    sundial::timestamp_t ts1 = 100;
+    
+    // Acquire and release lock
+    EXPECT_TRUE(tuple_.try_sundial_lock(thread1, ts1));
+    tuple_.sundial_unlock(thread1);
+    
+    // Verify timestamp is cleared
+    EXPECT_EQ(tuple_.get_lock_owner(), sundial::NO_LOCK_OWNER);
+    EXPECT_EQ(tuple_.get_lock_holder_ts(), 0ULL);
+}
+
+TEST_F(WaitDieTimestampTest, GetLockInfoReturnsCorrectValues) {
+    sundial::thread_id_t thread1 = 1;
+    sundial::timestamp_t ts1 = 100;
+    
+    // Initially not locked
+    sundial::thread_id_t owner;
+    sundial::timestamp_t holder_ts;
+    EXPECT_FALSE(tuple_.get_lock_info(owner, holder_ts));
+    
+    // Acquire lock
+    EXPECT_TRUE(tuple_.try_sundial_lock(thread1, ts1));
+    
+    // Now should return lock info
+    EXPECT_TRUE(tuple_.get_lock_info(owner, holder_ts));
+    EXPECT_EQ(owner, thread1);
+    EXPECT_EQ(holder_ts, ts1);
+}
+
+TEST_F(WaitDieTimestampTest, OlderTransactionWaitsAndAcquires) {
+    sundial::thread_id_t younger_thread = 1;
+    sundial::thread_id_t older_thread = 2;
+    sundial::timestamp_t younger_ts = 200;  // Younger = higher timestamp
+    sundial::timestamp_t older_ts = 100;    // Older = lower timestamp
+    
+    // Younger transaction acquires lock first
+    EXPECT_TRUE(tuple_.try_sundial_lock(younger_thread, younger_ts));
+    
+    // Older transaction should wait (according to Wait-Die policy)
+    EXPECT_TRUE(sundial::should_wait(older_ts, younger_ts));
+    
+    // Simulate waiting: younger releases, older acquires
+    tuple_.sundial_unlock(younger_thread);
+    EXPECT_TRUE(tuple_.try_sundial_lock(older_thread, older_ts));
+    
+    EXPECT_EQ(tuple_.get_lock_owner(), older_thread);
+    EXPECT_EQ(tuple_.get_lock_holder_ts(), older_ts);
+}
+
+TEST_F(WaitDieTimestampTest, YoungerTransactionDies) {
+    sundial::thread_id_t older_thread = 1;
+    sundial::thread_id_t younger_thread = 2;
+    sundial::timestamp_t older_ts = 100;    // Older = lower timestamp
+    sundial::timestamp_t younger_ts = 200;  // Younger = higher timestamp
+    
+    // Older transaction acquires lock first
+    EXPECT_TRUE(tuple_.try_sundial_lock(older_thread, older_ts));
+    
+    // Younger transaction should die (not wait)
+    EXPECT_FALSE(sundial::should_wait(younger_ts, older_ts));
+    
+    // Younger cannot acquire lock
+    EXPECT_FALSE(tuple_.try_sundial_lock(younger_thread, younger_ts));
+    
+    // Lock still held by older
+    EXPECT_EQ(tuple_.get_lock_owner(), older_thread);
+}
+
+TEST_F(WaitDieTimestampTest, ConcurrentWaitDieSimulation) {
+    // Simulate multiple transactions with different timestamps
+    constexpr int kNumTransactions = 4;
+    std::vector<sundial::timestamp_t> timestamps = {300, 100, 200, 400};  // Unsorted
+    std::atomic<int> wait_count{0};
+    std::atomic<int> die_count{0};
+    std::atomic<int> success_count{0};
+    std::vector<std::thread> threads;
+    
+    for (int i = 0; i < kNumTransactions; ++i) {
+        threads.emplace_back([&, i]() {
+            sundial::thread_id_t my_id = i;
+            sundial::timestamp_t my_ts = timestamps[i];
+            
+            // Try to acquire lock
+            if (tuple_.try_sundial_lock(my_id, my_ts)) {
+                success_count.fetch_add(1);
+                // Hold lock briefly
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                tuple_.sundial_unlock(my_id);
+            } else {
+                // Lock held by someone else - check Wait-Die
+                sundial::thread_id_t holder;
+                sundial::timestamp_t holder_ts;
+                if (tuple_.get_lock_info(holder, holder_ts)) {
+                    if (sundial::should_wait(my_ts, holder_ts)) {
+                        wait_count.fetch_add(1);
+                        // Simulate waiting with retry
+                        for (int retry = 0; retry < 10; retry++) {
+                            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                            if (tuple_.try_sundial_lock(my_id, my_ts)) {
+                                success_count.fetch_add(1);
+                                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                                tuple_.sundial_unlock(my_id);
+                                break;
+                            }
+                        }
+                    } else {
+                        die_count.fetch_add(1);  // Younger dies
+                    }
+                }
+            }
+        });
+    }
+    
+    for (auto& t : threads) {
+        t.join();
+    }
+    
+    // At least one transaction should succeed initially
+    EXPECT_GE(success_count.load(), 1);
+    
+    // Lock should be released at the end
+    EXPECT_EQ(tuple_.get_lock_owner(), sundial::NO_LOCK_OWNER);
+}
+
+TEST_F(WaitDieTimestampTest, StatisticsCountNewMetrics) {
+    // Verify new stats counters exist and work
+    auto& stats = sundial::get_sundial_stats();
+    
+    SUNDIAL_STAT_INC(waits);
+    SUNDIAL_STAT_INC(waits);
+    SUNDIAL_STAT_INC(wait_successes);
+    SUNDIAL_STAT_INC(wait_timeouts);
+    
+    EXPECT_EQ(stats.waits.load(), 2ULL);
+    EXPECT_EQ(stats.wait_successes.load(), 1ULL);
+    EXPECT_EQ(stats.wait_timeouts.load(), 1ULL);
 }
 
 // ============================================================================

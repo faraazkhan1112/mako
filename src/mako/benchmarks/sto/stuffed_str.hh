@@ -150,16 +150,39 @@ public:
     return lock_owner_.load(std::memory_order_acquire);
   }
   
-  inline bool try_sundial_lock(sundial::thread_id_t thread_id) {
+  /**
+   * Get the lock holder's transaction start timestamp.
+   * Used for Wait-Die decision making.
+   */
+  inline sundial::timestamp_t get_lock_holder_ts() const {
+    return lock_holder_ts_.load(std::memory_order_acquire);
+  }
+  
+  /**
+   * Try to acquire the Sundial write lock.
+   * @param thread_id The thread/transaction ID requesting the lock
+   * @param txn_start_ts The transaction's start timestamp (for Wait-Die)
+   * @return true if lock acquired, false otherwise
+   */
+  inline bool try_sundial_lock(sundial::thread_id_t thread_id, 
+                                sundial::timestamp_t txn_start_ts = 0) {
     sundial::thread_id_t expected = sundial::NO_LOCK_OWNER;
-    return lock_owner_.compare_exchange_strong(expected, thread_id,
-        std::memory_order_acq_rel, std::memory_order_acquire);
+    if (lock_owner_.compare_exchange_strong(expected, thread_id,
+        std::memory_order_acq_rel, std::memory_order_acquire)) {
+      // Successfully acquired lock - store our timestamp
+      lock_holder_ts_.store(txn_start_ts, std::memory_order_release);
+      return true;
+    }
+    return false;
   }
   
   inline void sundial_unlock(sundial::thread_id_t thread_id) {
     sundial::thread_id_t expected = thread_id;
-    lock_owner_.compare_exchange_strong(expected, sundial::NO_LOCK_OWNER,
-        std::memory_order_acq_rel, std::memory_order_acquire);
+    if (lock_owner_.compare_exchange_strong(expected, sundial::NO_LOCK_OWNER,
+        std::memory_order_acq_rel, std::memory_order_acquire)) {
+      // Successfully released lock - clear holder timestamp
+      lock_holder_ts_.store(0, std::memory_order_release);
+    }
   }
   
   inline bool is_locked_by_other(sundial::thread_id_t my_thread_id) const {
@@ -170,10 +193,26 @@ public:
   inline bool is_locked_by(sundial::thread_id_t thread_id) const {
     return lock_owner_.load(std::memory_order_acquire) == thread_id;
   }
+  
+  /**
+   * Check if the tuple is locked, and get both owner and holder's timestamp atomically.
+   * This is useful for Wait-Die decision making.
+   */
+  inline bool get_lock_info(sundial::thread_id_t& out_owner, 
+                            sundial::timestamp_t& out_holder_ts) const {
+    out_owner = lock_owner_.load(std::memory_order_acquire);
+    if (out_owner == sundial::NO_LOCK_OWNER) {
+      out_holder_ts = 0;
+      return false;  // Not locked
+    }
+    out_holder_ts = lock_holder_ts_.load(std::memory_order_acquire);
+    return true;  // Locked
+  }
 
 private:
   stuffed_str(const Stuff& stuff, uint32_t size, uint32_t capacity, const char *buf) :
-    stuff_(stuff), size_(size), capacity_(capacity), wts_(0), rts_(0), lock_owner_(sundial::NO_LOCK_OWNER) {
+    stuff_(stuff), size_(size), capacity_(capacity), wts_(0), rts_(0), 
+    lock_owner_(sundial::NO_LOCK_OWNER), lock_holder_ts_(0) {
     memcpy(buf_, buf, size);
     flex_buf_ = buf_; // initialize the dynamic pointer, initialize once
   }
@@ -187,6 +226,7 @@ private:
   std::atomic<sundial::timestamp_t> wts_;
   std::atomic<sundial::timestamp_t> rts_;
   std::atomic<sundial::thread_id_t> lock_owner_;
+  std::atomic<sundial::timestamp_t> lock_holder_ts_;  // Lock holder's txn start timestamp (for Wait-Die)
   
   char buf_[0]; // zero-length arrays in GNU C
 };

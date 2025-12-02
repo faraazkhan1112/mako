@@ -15,10 +15,10 @@ struct versioned_value_struct /*: public threadinfo::rcu_callback*/ {
   typedef T value_type;
   typedef TransactionTid::type version_type;
 
-  versioned_value_struct() : version_(), value_(), wts_(0), rts_(0), lock_owner_(sundial::NO_LOCK_OWNER) {}
+  versioned_value_struct() : version_(), value_(), wts_(0), rts_(0), lock_owner_(sundial::NO_LOCK_OWNER), lock_holder_ts_(0) {}
   // XXX Yihe: I made it public; is there any reason why it should be private?
   versioned_value_struct(const value_type& val, version_type v) 
-    : version_(v), value_(val), wts_(0), rts_(0), lock_owner_(sundial::NO_LOCK_OWNER) {}
+    : version_(v), value_(val), wts_(0), rts_(0), lock_owner_(sundial::NO_LOCK_OWNER), lock_holder_ts_(0) {}
   
   static versioned_value_struct* make(const value_type& val, version_type version) {
     return new versioned_value_struct<T>(val, version);
@@ -109,16 +109,30 @@ struct versioned_value_struct /*: public threadinfo::rcu_callback*/ {
   }
   
   /**
+   * Get the lock holder's transaction start timestamp (for Wait-Die)
+   */
+  inline sundial::timestamp_t get_lock_holder_ts() const {
+    return lock_holder_ts_.load(std::memory_order_acquire);
+  }
+  
+  /**
    * Try to acquire the Sundial write lock
    * Uses Wait-Die: returns true if lock acquired, false if should retry or abort
    * 
    * @param thread_id The requesting thread's ID
+   * @param txn_start_ts The transaction's start timestamp (for Wait-Die ordering)
    * @return true if lock acquired, false otherwise
    */
-  inline bool try_sundial_lock(sundial::thread_id_t thread_id) {
+  inline bool try_sundial_lock(sundial::thread_id_t thread_id,
+                                sundial::timestamp_t txn_start_ts = 0) {
     sundial::thread_id_t expected = sundial::NO_LOCK_OWNER;
-    return lock_owner_.compare_exchange_strong(expected, thread_id,
-        std::memory_order_acq_rel, std::memory_order_acquire);
+    if (lock_owner_.compare_exchange_strong(expected, thread_id,
+        std::memory_order_acq_rel, std::memory_order_acquire)) {
+      // Successfully acquired - store our timestamp for Wait-Die
+      lock_holder_ts_.store(txn_start_ts, std::memory_order_release);
+      return true;
+    }
+    return false;
   }
   
   /**
@@ -127,8 +141,11 @@ struct versioned_value_struct /*: public threadinfo::rcu_callback*/ {
    */
   inline void sundial_unlock(sundial::thread_id_t thread_id) {
     sundial::thread_id_t expected = thread_id;
-    lock_owner_.compare_exchange_strong(expected, sundial::NO_LOCK_OWNER,
-        std::memory_order_acq_rel, std::memory_order_acquire);
+    if (lock_owner_.compare_exchange_strong(expected, sundial::NO_LOCK_OWNER,
+        std::memory_order_acq_rel, std::memory_order_acquire)) {
+      // Successfully released - clear holder timestamp
+      lock_holder_ts_.store(0, std::memory_order_release);
+    }
   }
   
   /**
@@ -144,6 +161,21 @@ struct versioned_value_struct /*: public threadinfo::rcu_callback*/ {
    */
   inline bool is_locked_by(sundial::thread_id_t thread_id) const {
     return lock_owner_.load(std::memory_order_acquire) == thread_id;
+  }
+  
+  /**
+   * Get lock info atomically (owner and holder's timestamp)
+   * @return true if locked, false otherwise
+   */
+  inline bool get_lock_info(sundial::thread_id_t& out_owner,
+                            sundial::timestamp_t& out_holder_ts) const {
+    out_owner = lock_owner_.load(std::memory_order_acquire);
+    if (out_owner == sundial::NO_LOCK_OWNER) {
+      out_holder_ts = 0;
+      return false;
+    }
+    out_holder_ts = lock_holder_ts_.load(std::memory_order_acquire);
+    return true;
   }
 
   inline void deallocate_rcu(threadinfo& ti) {
@@ -168,6 +200,7 @@ private:
   std::atomic<sundial::timestamp_t> wts_;     // Write timestamp - last committed write
   std::atomic<sundial::timestamp_t> rts_;     // Read timestamp - lease upper bound
   std::atomic<sundial::thread_id_t> lock_owner_;  // Lock owner for Wait-Die 2PL
+  std::atomic<sundial::timestamp_t> lock_holder_ts_;  // Lock holder's txn start timestamp
 };
 
 // double box for non trivially copyable types!
@@ -181,7 +214,7 @@ public:
     return new versioned_value_struct(val, version);
   }
 
-  versioned_value_struct() : version_(), valueptr_(), wts_(0), rts_(0), lock_owner_(sundial::NO_LOCK_OWNER) {}
+  versioned_value_struct() : version_(), valueptr_(), wts_(0), rts_(0), lock_owner_(sundial::NO_LOCK_OWNER), lock_holder_ts_(0) {}
 
   bool needsResize(const value_type&) {
     return false;
@@ -242,16 +275,27 @@ public:
     return lock_owner_.load(std::memory_order_acquire);
   }
   
-  inline bool try_sundial_lock(sundial::thread_id_t thread_id) {
+  inline sundial::timestamp_t get_lock_holder_ts() const {
+    return lock_holder_ts_.load(std::memory_order_acquire);
+  }
+  
+  inline bool try_sundial_lock(sundial::thread_id_t thread_id,
+                                sundial::timestamp_t txn_start_ts = 0) {
     sundial::thread_id_t expected = sundial::NO_LOCK_OWNER;
-    return lock_owner_.compare_exchange_strong(expected, thread_id,
-        std::memory_order_acq_rel, std::memory_order_acquire);
+    if (lock_owner_.compare_exchange_strong(expected, thread_id,
+        std::memory_order_acq_rel, std::memory_order_acquire)) {
+      lock_holder_ts_.store(txn_start_ts, std::memory_order_release);
+      return true;
+    }
+    return false;
   }
   
   inline void sundial_unlock(sundial::thread_id_t thread_id) {
     sundial::thread_id_t expected = thread_id;
-    lock_owner_.compare_exchange_strong(expected, sundial::NO_LOCK_OWNER,
-        std::memory_order_acq_rel, std::memory_order_acquire);
+    if (lock_owner_.compare_exchange_strong(expected, sundial::NO_LOCK_OWNER,
+        std::memory_order_acq_rel, std::memory_order_acquire)) {
+      lock_holder_ts_.store(0, std::memory_order_release);
+    }
   }
   
   inline bool is_locked_by_other(sundial::thread_id_t my_thread_id) const {
@@ -262,6 +306,17 @@ public:
   inline bool is_locked_by(sundial::thread_id_t thread_id) const {
     return lock_owner_.load(std::memory_order_acquire) == thread_id;
   }
+  
+  inline bool get_lock_info(sundial::thread_id_t& out_owner,
+                            sundial::timestamp_t& out_holder_ts) const {
+    out_owner = lock_owner_.load(std::memory_order_acquire);
+    if (out_owner == sundial::NO_LOCK_OWNER) {
+      out_holder_ts = 0;
+      return false;
+    }
+    out_holder_ts = lock_holder_ts_.load(std::memory_order_acquire);
+    return true;
+  }
 
   inline void deallocate_rcu(threadinfo& ti) {
     // XXX: really this one needs to be a rcu_callback so we can call destructor
@@ -271,7 +326,7 @@ public:
 private:
   versioned_value_struct(const value_type& val, version_type version) 
     : version_(version), valueptr_(new value_type(std::move(val))), 
-      wts_(0), rts_(0), lock_owner_(sundial::NO_LOCK_OWNER) {}
+      wts_(0), rts_(0), lock_owner_(sundial::NO_LOCK_OWNER), lock_holder_ts_(0) {}
 
   version_type version_;
   value_type* valueptr_;
@@ -280,4 +335,5 @@ private:
   std::atomic<sundial::timestamp_t> wts_;
   std::atomic<sundial::timestamp_t> rts_;
   std::atomic<sundial::thread_id_t> lock_owner_;
+  std::atomic<sundial::timestamp_t> lock_holder_ts_;  // Lock holder's txn start timestamp
 };

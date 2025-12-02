@@ -47,6 +47,7 @@ static constexpr thread_id_t NO_LOCK_OWNER = -1;
 #endif
 
 // Enable Wait-Die deadlock prevention for write-write conflicts
+// NOTE: Only applies during commit phase (lock()), NOT execution phase
 #ifndef SUNDIAL_WAIT_DIE
 #define SUNDIAL_WAIT_DIE 1
 #endif
@@ -59,6 +60,16 @@ static constexpr thread_id_t NO_LOCK_OWNER = -1;
 // Maximum number of retry attempts for Wait-Die before aborting
 #ifndef SUNDIAL_MAX_WAIT_RETRIES
 #define SUNDIAL_MAX_WAIT_RETRIES 100
+#endif
+
+// Initial backoff in microseconds for Wait-Die spinning
+#ifndef SUNDIAL_WAIT_BACKOFF_INIT_US
+#define SUNDIAL_WAIT_BACKOFF_INIT_US 1
+#endif
+
+// Maximum backoff in microseconds for Wait-Die spinning
+#ifndef SUNDIAL_WAIT_BACKOFF_MAX_US
+#define SUNDIAL_WAIT_BACKOFF_MAX_US 1000
 #endif
 
 // Enable debug logging for Sundial operations (set to 1 for verbose output)
@@ -168,8 +179,11 @@ struct SundialStats {
     std::atomic<uint64_t> writes{0};          // Total writes with Sundial tracking
     std::atomic<uint64_t> wts_validations{0}; // wts validation checks at commit
     std::atomic<uint64_t> wts_conflicts{0};   // wts changed (abort due to write conflict)
-    std::atomic<uint64_t> lock_conflicts{0};  // Write-write lock conflicts
+    std::atomic<uint64_t> lock_conflicts{0};  // Write-write lock conflicts (younger txn dies)
     std::atomic<uint64_t> commits{0};         // Successful commits with Sundial
+    std::atomic<uint64_t> waits{0};           // Wait-Die: older txn waited for lock
+    std::atomic<uint64_t> wait_successes{0};  // Wait-Die: waits that acquired lock
+    std::atomic<uint64_t> wait_timeouts{0};   // Wait-Die: waits that timed out (abort)
     
     void print() const {
         fprintf(stderr, "\n=== Sundial Statistics ===\n");
@@ -179,6 +193,9 @@ struct SundialStats {
         fprintf(stderr, "WTS conflicts:     %lu\n", wts_conflicts.load());
         fprintf(stderr, "Lock conflicts:    %lu\n", lock_conflicts.load());
         fprintf(stderr, "Commits:           %lu\n", commits.load());
+        fprintf(stderr, "Wait-Die waits:    %lu\n", waits.load());
+        fprintf(stderr, "Wait successes:    %lu\n", wait_successes.load());
+        fprintf(stderr, "Wait timeouts:     %lu\n", wait_timeouts.load());
         fprintf(stderr, "==========================\n\n");
     }
     
@@ -189,6 +206,9 @@ struct SundialStats {
         wts_conflicts.store(0);
         lock_conflicts.store(0);
         commits.store(0);
+        waits.store(0);
+        wait_successes.store(0);
+        wait_timeouts.store(0);
     }
 };
 

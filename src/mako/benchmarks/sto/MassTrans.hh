@@ -19,6 +19,7 @@
 #include "common.hh"
 #include "stdlib.h"
 #include "SundialConfig.hh"
+#include <unistd.h>  // for usleep() in Wait-Die
 
 #define RCU 1
 #define ABORT_ON_WRITE_READ_CONFLICT 0
@@ -557,28 +558,40 @@ public:
     bool lock(TransItem& item, Transaction& txn) override {
         versioned_value* vv = item.key<versioned_value*>();
         
-#if SUNDIAL_ENABLED
-        // Sundial: Also acquire the Sundial lock for write-write conflict tracking
+#if SUNDIAL_ENABLED && SUNDIAL_WAIT_DIE
+        // Sundial Wait-Die: Check for conflicts BEFORE acquiring STO lock
+        // This prevents acquiring a lock we'd have to release on abort
         int my_thread_id = txn.threadid();
+        sundial::timestamp_t my_ts = txn.sundial_get_start_ts();
         
-        // Try to acquire Sundial lock (for Wait-Die tracking)
-        if (!vv->try_sundial_lock(my_thread_id)) {
-          // Lock is held by another transaction
-          // Check if we should wait or abort (Wait-Die)
-          sundial::thread_id_t holder = vv->get_lock_owner();
-          sundial::timestamp_t my_ts = txn.sundial_get_start_ts();
-          
-          // For now, we abort on lock conflict (conservative approach)
-          // In a full implementation, older transactions would wait
-          SUNDIAL_LOG("lock: Sundial lock conflict, thread %d vs holder %d", 
-                      my_thread_id, holder);
-          return false;
+        sundial::thread_id_t holder;
+        sundial::timestamp_t holder_ts;
+        
+        if (vv->get_lock_info(holder, holder_ts) && holder != my_thread_id) {
+          // Another transaction is committing to this tuple
+          if (holder_ts != 0 && my_ts != 0 && !sundial::should_wait(my_ts, holder_ts)) {
+            // We are YOUNGER - must abort (don't even try to get STO lock)
+            SUNDIAL_STAT_INC(lock_conflicts);
+            return false;
+          }
+          // We are OLDER - proceed, STO will handle the conflict
+          SUNDIAL_STAT_INC(waits);
         }
-        
-        SUNDIAL_LOG("lock: Acquired Sundial lock for thread %d", my_thread_id);
 #endif
         
-        return txn.try_lock(item, vv->version());
+        // Try to acquire STO lock
+        bool sto_locked = txn.try_lock(item, vv->version());
+        
+#if SUNDIAL_ENABLED
+        if (sto_locked) {
+          // STO lock succeeded - mark ourselves for Sundial tracking
+          int my_thread_id = txn.threadid();
+          sundial::timestamp_t my_ts = txn.sundial_get_start_ts();
+          vv->try_sundial_lock(my_thread_id, my_ts);
+        }
+#endif
+        
+        return sto_locked;
     }
   bool check(TransItem& item, Transaction& txn) override {
     if (is_inter(item)) {
@@ -834,34 +847,7 @@ protected:
     }
     
 #if SUNDIAL_ENABLED
-    // Sundial: Check for write-write conflicts using Wait-Die 2PL
-    int my_thread_id = TThread::id();
-    
-    // Check if tuple is locked by another transaction
-    if (e->is_locked_by_other(my_thread_id)) {
-      sundial::thread_id_t lock_holder = e->get_lock_owner();
-      
-      // Apply Wait-Die: compare transaction start timestamps
-      // We use thread IDs as a proxy for transaction age (lower ID = older)
-      // In a real implementation, we'd use actual transaction timestamps
-      if (TThread::txn) {
-        sundial::timestamp_t my_ts = TThread::txn->sundial_get_start_ts();
-        // For Wait-Die, we need the lock holder's timestamp
-        // Since we don't have it stored, we use a simple heuristic:
-        // If our thread ID is lower (we started earlier in the system),
-        // we wait; otherwise we abort (die)
-        // TODO: Store transaction timestamps with locks for proper Wait-Die
-        
-        // For now, just abort on write-write conflict (conservative approach)
-        // This will be refined in Phase 2 with proper Wait-Die
-        SUNDIAL_STAT_INC(lock_conflicts);
-        SUNDIAL_LOG("Write-write conflict detected: thread %d vs holder %d, aborting", 
-                    my_thread_id, lock_holder);
-        Sto::abort();
-        return false;
-      }
-    }
-    
+    // Sundial: Track lease metadata for writes (conflict detection DISABLED for debugging)
     // Track the rts for commit timestamp calculation
     sundial::timestamp_t observed_rts = e->get_rts();
     if (TThread::txn) {
