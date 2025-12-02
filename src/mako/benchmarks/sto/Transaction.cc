@@ -505,6 +505,28 @@ bool Transaction::try_commit(bool no_paxos) {
 #endif
     }
 
+#if SUNDIAL_ENABLED && SUNDIAL_READ_ONLY_OPT
+    // Sundial Read-Only Fast Path:
+    // If transaction is read-only and all leases are still valid,
+    // we can skip the validation phase entirely
+    if (sundial_can_use_read_only_fast_path()) {
+        SUNDIAL_STAT_INC(read_only_fast_path);
+        SUNDIAL_LOG("Read-only fast path: commit_ts=%lu <= min_rts=%lu",
+                    sundial_max_read_wts_ + 1, sundial_min_read_rts_);
+        // Skip phase 2 validation - go directly to commit
+        // No writes to install, no remote validation needed for read-only
+        stop(true, nullptr, 0);
+        return true;
+    }
+    
+    // Track read-only transactions that couldn't use fast path
+    if (sundial_is_read_only()) {
+        SUNDIAL_STAT_INC(read_only_slow_path);
+        SUNDIAL_LOG("Read-only slow path: commit_ts=%lu > min_rts=%lu",
+                    sundial_max_read_wts_ + 1, sundial_min_read_rts_);
+    }
+#endif
+
     //phase2
     for (unsigned tidx = 0; tidx != tset_size_; ++tidx) {
         it = (tidx % tset_chunk ? it + 1 : tset_[tidx / tset_chunk]);

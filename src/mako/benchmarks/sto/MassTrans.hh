@@ -19,7 +19,6 @@
 #include "common.hh"
 #include "stdlib.h"
 #include "SundialConfig.hh"
-#include <unistd.h>  // for usleep() in Wait-Die
 
 #define RCU 1
 #define ABORT_ON_WRITE_READ_CONFLICT 0
@@ -170,10 +169,10 @@ public:
       item.item().set_sundial_observed_wts(observed_wts);
       item.item().set_sundial_observed_rts(observed_rts);
       
-      // Track max wts in read set for commit timestamp calculation
-      // This is done in the Transaction object
+      // Track max wts and min rts in read set
       if (TThread::txn) {
         TThread::txn->sundial_update_max_read_wts(observed_wts);
+        TThread::txn->sundial_update_min_read_rts(observed_rts);  // For read-only fast path
       }
       
       SUNDIAL_STAT_INC(reads);
@@ -305,6 +304,17 @@ private:
       // TransItem::key_ is actuall value, TransItem::wdata_ or rdata_ is actual key in write-set and read-set, respectively
       auto item = Sto::new_item(this, val);
       item.template add_write<key_write_value_type>(key).add_flags(insert_bit);
+      
+#if SUNDIAL_ENABLED
+      // Sundial: Mark transaction as having writes for INSERT of new keys
+      // This is necessary because handlePutFound is not called for new key inserts
+      if (TThread::txn) {
+        TThread::txn->sundial_mark_has_writes();
+        SUNDIAL_STAT_INC(writes);
+        SUNDIAL_LOG("trans_write INSERT: new key insert, marked as write");
+      }
+#endif
+      
       return found;
     }
   }
@@ -698,7 +708,7 @@ public:
 #if SUNDIAL_ENABLED
     // Sundial: Update wts and rts on commit
     // wts = commit_ts (marks when this write was committed)
-    // rts = commit_ts (lease starts from commit time)
+    // rts = commit_ts + lease_duration (lease extends beyond commit time for read-only fast path)
     sundial::timestamp_t commit_ts = t.sundial_get_commit_ts();
     if (commit_ts == 0) {
       // Compute commit_ts if not already done
@@ -708,10 +718,12 @@ public:
     // Set the write timestamp to our commit timestamp
     e->set_wts(commit_ts);
     
-    // Set rts to at least commit_ts (the lease extends from here)
+    // Set rts to commit_ts + lease duration
+    // This allows read-only transactions within the lease window to use the fast path
+    sundial::timestamp_t new_rts = commit_ts + SUNDIAL_LEASE_DURATION;
     sundial::timestamp_t current_rts = e->get_rts();
-    if (commit_ts > current_rts) {
-      e->set_rts(commit_ts);
+    if (new_rts > current_rts) {
+      e->set_rts(new_rts);
     }
     
     SUNDIAL_STAT_INC(commits);

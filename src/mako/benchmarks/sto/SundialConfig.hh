@@ -57,19 +57,11 @@ static constexpr thread_id_t NO_LOCK_OWNER = -1;
 #define SUNDIAL_READ_ONLY_OPT 1
 #endif
 
-// Maximum number of retry attempts for Wait-Die before aborting
-#ifndef SUNDIAL_MAX_WAIT_RETRIES
-#define SUNDIAL_MAX_WAIT_RETRIES 100
-#endif
-
-// Initial backoff in microseconds for Wait-Die spinning
-#ifndef SUNDIAL_WAIT_BACKOFF_INIT_US
-#define SUNDIAL_WAIT_BACKOFF_INIT_US 1
-#endif
-
-// Maximum backoff in microseconds for Wait-Die spinning
-#ifndef SUNDIAL_WAIT_BACKOFF_MAX_US
-#define SUNDIAL_WAIT_BACKOFF_MAX_US 1000
+// Lease duration offset: how far beyond commit_ts the rts (lease) extends
+// This allows read-only transactions within this window to use the fast path
+// Higher values = more fast path hits but potential for stale reads in distributed setting
+#ifndef SUNDIAL_LEASE_DURATION
+#define SUNDIAL_LEASE_DURATION 1000
 #endif
 
 // Enable debug logging for Sundial operations (set to 1 for verbose output)
@@ -83,31 +75,6 @@ static constexpr thread_id_t NO_LOCK_OWNER = -1;
 #endif
 
 // ============================================================================
-// Lease Configuration
-// ============================================================================
-
-// Default lease duration (in logical time units)
-// When a transaction reads a tuple, it extends rts by at least this amount
-#ifndef SUNDIAL_DEFAULT_LEASE_DURATION
-#define SUNDIAL_DEFAULT_LEASE_DURATION 10
-#endif
-
-// Maximum lease extension allowed
-#ifndef SUNDIAL_MAX_LEASE_EXTENSION
-#define SUNDIAL_MAX_LEASE_EXTENSION 1000
-#endif
-
-// ============================================================================
-// Lock Bits in Version Field
-// ============================================================================
-
-// We use the existing lock mechanism from TransactionTid, but add Sundial-specific
-// tracking for the lock owner to implement Wait-Die
-static constexpr uint64_t SUNDIAL_LOCK_BIT = 1ULL << 63;
-static constexpr uint64_t SUNDIAL_LOCK_OWNER_MASK = 0x7FFFFFFFULL;  // 31 bits for thread ID
-static constexpr uint64_t SUNDIAL_LOCK_OWNER_SHIFT = 32;
-
-// ============================================================================
 // Utility Functions
 // ============================================================================
 
@@ -118,14 +85,6 @@ static constexpr uint64_t SUNDIAL_LOCK_OWNER_SHIFT = 32;
 inline timestamp_t get_current_timestamp() {
     static std::atomic<timestamp_t> global_ts{1};
     return global_ts.fetch_add(1, std::memory_order_relaxed);
-}
-
-/**
- * Atomically read the global timestamp without incrementing
- */
-inline timestamp_t read_current_timestamp() {
-    static std::atomic<timestamp_t> global_ts{1};
-    return global_ts.load(std::memory_order_relaxed);
 }
 
 /**
@@ -184,6 +143,8 @@ struct SundialStats {
     std::atomic<uint64_t> waits{0};           // Wait-Die: older txn waited for lock
     std::atomic<uint64_t> wait_successes{0};  // Wait-Die: waits that acquired lock
     std::atomic<uint64_t> wait_timeouts{0};   // Wait-Die: waits that timed out (abort)
+    std::atomic<uint64_t> read_only_fast_path{0};  // Read-only transactions that used fast path
+    std::atomic<uint64_t> read_only_slow_path{0};  // Read-only transactions that needed validation
     
     void print() const {
         fprintf(stderr, "\n=== Sundial Statistics ===\n");
@@ -196,6 +157,8 @@ struct SundialStats {
         fprintf(stderr, "Wait-Die waits:    %lu\n", waits.load());
         fprintf(stderr, "Wait successes:    %lu\n", wait_successes.load());
         fprintf(stderr, "Wait timeouts:     %lu\n", wait_timeouts.load());
+        fprintf(stderr, "RO fast path:      %lu\n", read_only_fast_path.load());
+        fprintf(stderr, "RO slow path:      %lu\n", read_only_slow_path.load());
         fprintf(stderr, "==========================\n\n");
     }
     
@@ -209,6 +172,8 @@ struct SundialStats {
         waits.store(0);
         wait_successes.store(0);
         wait_timeouts.store(0);
+        read_only_fast_path.store(0);
+        read_only_slow_path.store(0);
     }
 };
 

@@ -506,6 +506,7 @@ private:
         // Initialize Sundial fields
         sundial_start_ts_ = sundial::get_current_timestamp();
         sundial_max_read_wts_ = 0;
+        sundial_min_read_rts_ = sundial::TIMESTAMP_INFINITY;  // Track minimum for fast path
         sundial_max_write_rts_ = 0;
         sundial_commit_ts_ = 0;
         sundial_read_only_ = true;  // Assume read-only until we see a write
@@ -849,6 +850,9 @@ public:
     // Maximum wts observed in the read set (for commit_ts calculation)
     mutable sundial::timestamp_t sundial_max_read_wts_;
     
+    // Minimum rts observed in the read set (for read-only fast path)
+    mutable sundial::timestamp_t sundial_min_read_rts_;
+    
     // Maximum rts observed in the write set (for commit_ts calculation)
     mutable sundial::timestamp_t sundial_max_write_rts_;
     
@@ -865,6 +869,16 @@ public:
     void sundial_update_max_read_wts(sundial::timestamp_t wts) {
         if (wts > sundial_max_read_wts_) {
             sundial_max_read_wts_ = wts;
+        }
+    }
+    
+    /**
+     * Update the minimum rts observed in the read set
+     * Called during transGet - used for read-only fast path
+     */
+    void sundial_update_min_read_rts(sundial::timestamp_t rts) {
+        if (rts < sundial_min_read_rts_) {
+            sundial_min_read_rts_ = rts;
         }
     }
     
@@ -914,6 +928,36 @@ public:
      */
     void sundial_mark_has_writes() {
         sundial_read_only_ = false;
+    }
+    
+    /**
+     * Check if read-only fast path can be used
+     * Returns true if:
+     *   1. Transaction is read-only
+     *   2. Transaction has at least one read (not empty)
+     *   3. commit_ts <= min_rts (all leases still valid)
+     * This allows skipping validation for read-only transactions
+     */
+    bool sundial_can_use_read_only_fast_path() const {
+        if (!sundial_read_only_) {
+            return false;
+        }
+        // Don't use fast path for empty transactions (no reads)
+        // min_read_rts_ stays at INFINITY if no reads occurred
+        if (sundial_min_read_rts_ == sundial::TIMESTAMP_INFINITY) {
+            return false;
+        }
+        // For read-only, commit_ts = max_wts_read + 1
+        sundial::timestamp_t commit_ts = sundial_max_read_wts_ + 1;
+        // Fast path valid if commit_ts doesn't exceed any lease
+        return commit_ts <= sundial_min_read_rts_;
+    }
+    
+    /**
+     * Get the minimum rts observed in the read set
+     */
+    sundial::timestamp_t sundial_get_min_read_rts() const {
+        return sundial_min_read_rts_;
     }
 
 private:
