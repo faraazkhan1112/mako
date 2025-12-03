@@ -569,35 +569,64 @@ public:
         versioned_value* vv = item.key<versioned_value*>();
         
 #if SUNDIAL_ENABLED && SUNDIAL_WAIT_DIE
-        // Sundial Wait-Die: Check for conflicts BEFORE acquiring STO lock
-        // This prevents acquiring a lock we'd have to release on abort
+        // Sundial Wait-Die with proper spin-waiting for older transactions
         int my_thread_id = txn.threadid();
         sundial::timestamp_t my_ts = txn.sundial_get_start_ts();
         
         sundial::thread_id_t holder;
         sundial::timestamp_t holder_ts;
         
-        if (vv->get_lock_info(holder, holder_ts) && holder != my_thread_id) {
-          // Another transaction is committing to this tuple
-          if (holder_ts != 0 && my_ts != 0 && !sundial::should_wait(my_ts, holder_ts)) {
-            // We are YOUNGER - must abort (don't even try to get STO lock)
-            SUNDIAL_STAT_INC(lock_conflicts);
-            return false;
-          }
-          // We are OLDER - proceed, STO will handle the conflict
-          SUNDIAL_STAT_INC(waits);
+        // Spin-wait loop implementing true Wait-Die semantics
+        unsigned spin_count = 0;
+        constexpr unsigned SUNDIAL_MAX_WAIT_SPINS = 10000;  // ~10-100μs with relax_fence
+        
+        while (vv->get_lock_info(holder, holder_ts) && holder != my_thread_id) {
+            // Can't determine age if timestamps are 0
+            if (holder_ts == 0 || my_ts == 0) {
+                break;  // Proceed to STO lock, let it handle
+            }
+            
+            if (!sundial::should_wait(my_ts, holder_ts)) {
+                // We are YOUNGER (higher timestamp) - abort immediately (DIE)
+                SUNDIAL_STAT_INC(lock_conflicts);
+                SUNDIAL_LOG("Wait-Die: younger txn (ts=%lu) dies, holder ts=%lu", my_ts, holder_ts);
+                return false;
+            }
+            
+            // We are OLDER (lower timestamp) - spin wait (WAIT)
+            // Track when we first enter the wait state
+            if (spin_count == 0) {
+                SUNDIAL_STAT_INC(waits);
+            }
+            
+            if (++spin_count > SUNDIAL_MAX_WAIT_SPINS) {
+                // Timeout - abort to prevent livelock
+                SUNDIAL_STAT_INC(wait_timeouts);
+                SUNDIAL_LOG("Wait-Die: older txn (ts=%lu) timed out waiting for holder ts=%lu", my_ts, holder_ts);
+                return false;
+            }
+            
+            // Efficient spin using CPU pause instruction
+            relax_fence();
+        }
+        
+        // If we waited and lock is now free, record success
+        if (spin_count > 0) {
+            SUNDIAL_STAT_INC(wait_successes);
+            SUNDIAL_LOG("Wait-Die: older txn (ts=%lu) acquired lock after %u spins", my_ts, spin_count);
         }
 #endif
         
-        // Try to acquire STO lock
+        // Try to acquire STO lock (this also spins internally)
         bool sto_locked = txn.try_lock(item, vv->version());
         
 #if SUNDIAL_ENABLED
         if (sto_locked) {
           // STO lock succeeded - mark ourselves for Sundial tracking
-          int my_thread_id = txn.threadid();
-          sundial::timestamp_t my_ts = txn.sundial_get_start_ts();
-          vv->try_sundial_lock(my_thread_id, my_ts);
+          // Note: Redeclare here to handle case when SUNDIAL_WAIT_DIE is disabled
+          int lock_thread_id = txn.threadid();
+          sundial::timestamp_t lock_ts = txn.sundial_get_start_ts();
+          vv->try_sundial_lock(lock_thread_id, lock_ts);
         }
 #endif
         
