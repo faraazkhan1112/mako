@@ -809,7 +809,7 @@ void* heartbeatMonitor2(void* arg) { // happens on the learner
     if (duration2.count()/1000.0/1000.0 > 1000) { // timeout: 1s
      Log_info("the time for the heartbeat: %lf ms", duration2.count()/1000.0/1000.0);
      time_t end = time (NULL);
-     if (end - st > 35) {
+     if (end - st > 120) { // After 120s, exit cleanly without failover
        Log_info("Let's stop it automatically without failover!!!");
        std::quick_exit( EXIT_SUCCESS );
      }
@@ -860,7 +860,7 @@ void* heartbeatMonitor3(void* arg) {
      // reach threshold to trigger a failover
      // 5ms is far enough within the same data center, otherwise, several seconds across data-center
      time_t end = time (NULL);
-     if (end - st > 35) {
+     if (end - st > 120) { // After 120s, exit cleanly without failover
        Log_info("Let's stop it automatically without failover2!!!");
        exit(0);
      }

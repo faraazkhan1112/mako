@@ -11,19 +11,25 @@ let up=trd+3
 #sudo cgset -r cpuset.mems=0 cpulimit
 #sudo cgset -r cpuset.cpus=0-$up cpulimit
 mkdir -p results
-path=$(pwd)/src/mako
+path="$(pwd)/src/mako"
 
-# Build the command with optional flags
-CMD="./build/dbtest --num-threads $trd --shard-index $shard --shard-config $path/config/local-shards$nshard-warehouses$trd.yml -F config/1leader_2followers/paxos$trd\_shardidx$shard.yml -F config/occ_paxos.yml -P $cluster"
+# Build the command as an array to handle paths with spaces
+CMD=(./build/dbtest 
+    --num-threads "$trd" 
+    --shard-index "$shard" 
+    --shard-config "$path/config/local-shards$nshard-warehouses$trd.yml" 
+    -F "config/1leader_2followers/paxos${trd}_shardidx${shard}.yml" 
+    -F "config/occ_paxos.yml" 
+    -P "$cluster")
 
 # Add --is-micro flag if enabled (value is 1)
 if [ "$is_micro" == "1" ]; then
-    CMD="$CMD --is-micro"
+    CMD+=(--is-micro)
 fi
 
 # Add --is-replicated flag if enabled (value is 1)
 if [ "$is_replicated" == "1" ]; then
-    CMD="$CMD --is-replicated"
+    CMD+=(--is-replicated)
 fi
 
 # Print configuration
@@ -38,4 +44,4 @@ echo "  Micro benchmark:   $([ "$is_micro" == "1" ] && echo "enabled" || echo "d
 echo "  Replicated mode:   $([ "$is_replicated" == "1" ] && echo "enabled" || echo "disabled")"
 echo "========================================="
 
-eval $CMD 
+"${CMD[@]}" 

@@ -17,7 +17,7 @@ rm -f simple-shard0*.log simple-shard1*.log
 USERNAME=${USER:-unknown}
 rm -rf /tmp/${USERNAME}_mako_rocksdb_shard*
 
-trd=6
+trd=2 #Since we were testing on a machine with limited RAM, we used 2 threads per shard to avoid the OOM killer from terminating the process.
 script_name="$(basename "$0")"
 
 # Determine transport type and create unique log prefix
@@ -38,7 +38,7 @@ sleep 1
 nohup bash bash/shard.sh 2 0 $trd p1 0 1 > ${log_prefix}_shard0-p1.log 2>&1 &
 SHARD0_P1_PID=$!
 
-sleep 2
+sleep 5
 
 # Start shard 1 in background
 echo "Starting shard 1..."
@@ -54,7 +54,7 @@ SHARD1_P1_PID=$!
 
 # Wait for experiments to run
 echo "Running experiments for 30 seconds..."
-sleep 70
+sleep 120
 
 # Kill the processes - FORCE KILL ALL
 echo "Stopping shards..."

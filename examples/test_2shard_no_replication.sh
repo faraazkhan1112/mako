@@ -25,7 +25,7 @@ sleep 1
 echo "Starting shard 0..."
 nohup bash bash/shard.sh 2 0 $trd localhost > ${log_prefix}_shard0-$trd.log 2>&1 &
 SHARD0_PID=$!
-sleep 2
+sleep 5
 
 # Start shard 1 in background
 echo "Starting shard 1..."
@@ -33,8 +33,9 @@ nohup bash bash/shard.sh 2 1 $trd localhost > ${log_prefix}_shard1-$trd.log 2>&1
 SHARD1_PID=$!
 
 # Wait for experiments to run
+# Note: Need extra time for setup (~90s) + runtime (30s) + shutdown
 echo "Running experiments for 30 seconds..."
-sleep 50
+sleep 150
 
 # Kill the processes
 echo "Stopping shards..."

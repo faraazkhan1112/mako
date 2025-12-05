@@ -639,7 +639,7 @@ static void setup_leader_election_callbacks()
                                                       benchConfig.getConfig()->shard(0, clusterRoleLocal).host.c_str(), 
                                                       benchConfig.getConfig()->mports[clusterRoleLocal]);
           std::cout<<"get fvw, " << clusterRoleLocal << ", fvw_"+std::to_string(i)<<":"<<w_i<<std::endl;
-          uint32_t watermark = std::stoi(w_i);
+          uint32_t watermark = w_i.empty() ? 0 : std::stoi(w_i);
           max_watermark = std::max(max_watermark, watermark);
         }
 

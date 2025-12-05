@@ -49,12 +49,12 @@ static constexpr thread_id_t NO_LOCK_OWNER = -1;
 // Enable Wait-Die deadlock prevention for write-write conflicts
 // NOTE: Only applies during commit phase (lock()), NOT execution phase
 #ifndef SUNDIAL_WAIT_DIE
-#define SUNDIAL_WAIT_DIE 1
+#define SUNDIAL_WAIT_DIE 0
 #endif
 
 // Enable read-only transaction optimization (fast path)
 #ifndef SUNDIAL_READ_ONLY_OPT
-#define SUNDIAL_READ_ONLY_OPT 1
+#define SUNDIAL_READ_ONLY_OPT 0
 #endif
 
 // Lease duration offset: how far beyond commit_ts the rts (lease) extends
@@ -71,7 +71,7 @@ static constexpr thread_id_t NO_LOCK_OWNER = -1;
 
 // Enable statistics collection (lightweight)
 #ifndef SUNDIAL_STATS
-#define SUNDIAL_STATS 1
+#define SUNDIAL_STATS 0
 #endif
 
 // ============================================================================

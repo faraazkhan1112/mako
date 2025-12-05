@@ -17,22 +17,17 @@ ps aux | grep -i dbtest | awk "{print \$2}" | xargs kill -9 2>/dev/null
 ps aux | grep -i simpleTransactionRep | awk "{print \$2}" | xargs kill -9 2>/dev/null
 sleep 1
 
-# Start shard 0 in background - capture ALL PIDs
+# Start BOTH shards' Paxos replicas first, then wait for transport to be ready
 echo "Starting shard 0..."
-trd=6
+trd=2
 nohup ./build/simpleTransactionRep 2 0 $trd localhost 1 > simple-shard0-localhost.log 2>&1 &
 PID_S0_LOCALHOST=$!
 nohup ./build/simpleTransactionRep 2 0 $trd learner 1 > simple-shard0-learner.log 2>&1 &
 PID_S0_LEARNER=$!
 nohup ./build/simpleTransactionRep 2 0 $trd p2 1 > simple-shard0-p2.log 2>&1 &
 PID_S0_P2=$!
-sleep 1
-nohup ./build/simpleTransactionRep 2 0 $trd p1 1  > simple-shard0-p1.log 2>&1 &
-PID_S0_P1=$!
 
-sleep 2
-
-# Start shard 1 in background - capture ALL PIDs
+# Start shard 1 BEFORE shard 0's p1 to ensure cross-shard transport is ready
 echo "Starting shard 1..."
 nohup ./build/simpleTransactionRep 2 1 $trd localhost 1 > simple-shard1-localhost.log 2>&1 &
 PID_S1_LOCALHOST=$!
@@ -40,7 +35,13 @@ nohup ./build/simpleTransactionRep 2 1 $trd learner 1 > simple-shard1-learner.lo
 PID_S1_LEARNER=$!
 nohup ./build/simpleTransactionRep 2 1 $trd p2 1 > simple-shard1-p2.log 2>&1 &
 PID_S1_P2=$!
-sleep 1
+
+# Wait for all processes to initialize their transport layers
+sleep 10
+
+# Now start followers after all transports are ready
+nohup ./build/simpleTransactionRep 2 0 $trd p1 1  > simple-shard0-p1.log 2>&1 &
+PID_S0_P1=$!
 nohup ./build/simpleTransactionRep 2 1 $trd p1 1  > simple-shard1-p1.log 2>&1 &
 PID_S1_P1=$!
 

@@ -55,6 +55,9 @@ public:
             } catch (abstract_db::abstract_abort_exception &ex) {
                 printf("Write aborted: %s\n", key.c_str());
                 db->abort_txn(txn);
+            } catch (int error_code) {
+                printf("Write timeout/error: %s (error: %d)\n", key.c_str(), error_code);
+                db->abort_txn(txn);
             }
         }
         VERIFY_PASS("Write 5 records");
@@ -76,6 +79,11 @@ public:
                 }
             } catch (abstract_db::abstract_abort_exception &ex) {
                 printf("Read aborted: %s\n", key.c_str());
+                db->abort_txn(txn);
+                all_reads_ok = false;
+                break;
+            } catch (int error_code) {
+                printf("Read timeout/error: %s (error: %d)\n", key.c_str(), error_code);
                 db->abort_txn(txn);
                 all_reads_ok = false;
                 break;
@@ -102,6 +110,11 @@ public:
                     }
                 } catch (abstract_db::abstract_abort_exception &ex) {
                     printf("Read aborted: %s\n", key.c_str());
+                    db->abort_txn(txn);
+                    all_reads_ok = false;
+                    break;
+                } catch (int error_code) {
+                    printf("Read remote timeout/error: %s (error: %d)\n", key.c_str(), error_code);
                     db->abort_txn(txn);
                     all_reads_ok = false;
                     break;

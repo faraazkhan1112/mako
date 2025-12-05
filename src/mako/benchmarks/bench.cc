@@ -166,7 +166,7 @@ bench_worker::run()
                                                       benchConfig.getConfig()->shard(0, clusterRoleLocal).host.c_str(), 
                                                       benchConfig.getConfig()->mports[clusterRoleLocal]);
           std::cout<<"get fvw, " << clusterRoleLocal << ", fvw_"+std::to_string(i)<<":"<<w_i<<std::endl;
-          fvw[i] = std::stoi(w_i);
+          fvw[i] = w_i.empty() ? 0 : std::stoi(w_i);
         }
 
         sync_util::sync_logger::update_stable_timestamp_vec(get_epoch()-1, fvw);
