@@ -8,7 +8,7 @@
  * 2. Atomic lease field operations (wts, rts, lock_owner)
  * 3. Sundial locking operations (try_lock, unlock, is_locked_by)
  * 4. Lease extension (extend_rts)
- * 5. Statistics collection
+ * 5. Wait-Die policy
  * 
  * Note: This test uses a standalone SundialTuple mock to avoid STO framework
  * dependencies while still validating the core Sundial mechanisms.
@@ -122,8 +122,6 @@ struct SundialTuple {
 class SundialConfigTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Reset stats before each test
-        sundial::get_sundial_stats().reset();
     }
 };
 
@@ -222,7 +220,6 @@ protected:
     SundialTuple tuple_;
     
     void SetUp() override {
-        sundial::get_sundial_stats().reset();
     }
 };
 
@@ -302,7 +299,6 @@ protected:
     SundialTuple tuple_;
     
     void SetUp() override {
-        sundial::get_sundial_stats().reset();
     }
 };
 
@@ -421,79 +417,6 @@ TEST_F(SundialLockingTest, ConcurrentLocking) {
 }
 
 // ============================================================================
-// Sundial Statistics Tests
-// ============================================================================
-
-class SundialStatsTest : public ::testing::Test {
-protected:
-    void SetUp() override {
-        sundial::get_sundial_stats().reset();
-    }
-};
-
-TEST_F(SundialStatsTest, InitialValuesAreZero) {
-    auto& stats = sundial::get_sundial_stats();
-    EXPECT_EQ(stats.reads.load(), 0ULL);
-    EXPECT_EQ(stats.writes.load(), 0ULL);
-    EXPECT_EQ(stats.wts_validations.load(), 0ULL);
-    EXPECT_EQ(stats.wts_conflicts.load(), 0ULL);
-    EXPECT_EQ(stats.lock_conflicts.load(), 0ULL);
-    EXPECT_EQ(stats.commits.load(), 0ULL);
-}
-
-TEST_F(SundialStatsTest, IncrementStats) {
-    SUNDIAL_STAT_INC(reads);
-    SUNDIAL_STAT_INC(reads);
-    SUNDIAL_STAT_INC(writes);
-    SUNDIAL_STAT_INC(wts_validations);
-    SUNDIAL_STAT_INC(wts_conflicts);
-    SUNDIAL_STAT_INC(lock_conflicts);
-    SUNDIAL_STAT_INC(commits);
-    
-    auto& stats = sundial::get_sundial_stats();
-    EXPECT_EQ(stats.reads.load(), 2ULL);
-    EXPECT_EQ(stats.writes.load(), 1ULL);
-    EXPECT_EQ(stats.wts_validations.load(), 1ULL);
-    EXPECT_EQ(stats.wts_conflicts.load(), 1ULL);
-    EXPECT_EQ(stats.lock_conflicts.load(), 1ULL);
-    EXPECT_EQ(stats.commits.load(), 1ULL);
-}
-
-TEST_F(SundialStatsTest, ResetStats) {
-    SUNDIAL_STAT_INC(reads);
-    SUNDIAL_STAT_INC(writes);
-    SUNDIAL_STAT_INC(commits);
-    
-    auto& stats = sundial::get_sundial_stats();
-    stats.reset();
-    
-    EXPECT_EQ(stats.reads.load(), 0ULL);
-    EXPECT_EQ(stats.writes.load(), 0ULL);
-    EXPECT_EQ(stats.commits.load(), 0ULL);
-}
-
-TEST_F(SundialStatsTest, ConcurrentIncrements) {
-    constexpr int kNumThreads = 8;
-    constexpr int kIncrementsPerThread = 10000;
-    std::vector<std::thread> threads;
-    
-    for (int i = 0; i < kNumThreads; ++i) {
-        threads.emplace_back([&]() {
-            for (int j = 0; j < kIncrementsPerThread; ++j) {
-                SUNDIAL_STAT_INC(reads);
-            }
-        });
-    }
-    
-    for (auto& t : threads) {
-        t.join();
-    }
-    
-    auto& stats = sundial::get_sundial_stats();
-    EXPECT_EQ(stats.reads.load(), static_cast<uint64_t>(kNumThreads * kIncrementsPerThread));
-}
-
-// ============================================================================
 // Lease Coherence Tests (Simulated Sundial Operations)
 // ============================================================================
 
@@ -505,8 +428,6 @@ protected:
         // Initialize lease with some values
         tuple_.set_wts(100);
         tuple_.set_rts(100);
-        
-        sundial::get_sundial_stats().reset();
     }
 };
 
@@ -594,6 +515,117 @@ TEST_F(SundialLeaseCoherenceTest, WriteWriteConflictDetection) {
     tuple_.sundial_unlock(txn2);
 }
 
+TEST_F(SundialLeaseCoherenceTest, ReadWriteConflictDetection) {
+    // This tests the core Sundial read-write conflict scenario:
+    // T1 reads a tuple, T2 writes to it, T1 should abort at commit time
+    
+    // T1 reads the tuple - captures observed_wts
+    sundial::timestamp_t t1_observed_wts = tuple_.get_wts();
+    sundial::timestamp_t t1_observed_rts = tuple_.get_rts();
+    EXPECT_EQ(t1_observed_wts, 100ULL);
+    EXPECT_EQ(t1_observed_rts, 100ULL);
+    
+    // T2 comes along and writes to the same tuple (completes first)
+    sundial::thread_id_t t2_id = 2;
+    EXPECT_TRUE(tuple_.try_sundial_lock(t2_id));
+    tuple_.set_wts(150);  // T2 commits at ts=150
+    tuple_.set_rts(150);
+    tuple_.sundial_unlock(t2_id);
+    
+    // T1 tries to commit - must validate that wts hasn't changed
+    // This is the Sundial OCC validation for read-write conflicts
+    bool can_commit = sundial::can_extend_lease(tuple_.get_wts(), t1_observed_wts);
+    
+    // T1 should FAIL validation because wts changed (100 -> 150)
+    EXPECT_FALSE(can_commit) << "T1 should abort: wts changed from 100 to 150";
+}
+
+TEST_F(SundialLeaseCoherenceTest, ReadWriteNoConflict) {
+    // Test that concurrent reads with no intervening writes succeed
+    
+    // T1 and T2 both read the tuple
+    sundial::timestamp_t t1_observed_wts = tuple_.get_wts();
+    sundial::timestamp_t t2_observed_wts = tuple_.get_wts();
+    
+    EXPECT_EQ(t1_observed_wts, 100ULL);
+    EXPECT_EQ(t2_observed_wts, 100ULL);
+    
+    // T1 commits (read-only, just extends lease if needed)
+    sundial::timestamp_t t1_commit_ts = 105;
+    bool t1_can_commit = sundial::can_extend_lease(tuple_.get_wts(), t1_observed_wts);
+    EXPECT_TRUE(t1_can_commit);
+    if (t1_can_commit && t1_commit_ts > tuple_.get_rts()) {
+        tuple_.extend_rts(t1_commit_ts);
+    }
+    
+    // T2 commits (read-only) - should still succeed
+    sundial::timestamp_t t2_commit_ts = 110;
+    bool t2_can_commit = sundial::can_extend_lease(tuple_.get_wts(), t2_observed_wts);
+    EXPECT_TRUE(t2_can_commit) << "T2 should succeed: wts unchanged, just lease extended";
+    if (t2_can_commit && t2_commit_ts > tuple_.get_rts()) {
+        tuple_.extend_rts(t2_commit_ts);
+    }
+    
+    // rts should be extended to 110 (max of both)
+    EXPECT_EQ(tuple_.get_rts(), 110ULL);
+    // wts should remain unchanged
+    EXPECT_EQ(tuple_.get_wts(), 100ULL);
+}
+
+// ============================================================================
+// Multi-Tuple Transaction Tests
+// ============================================================================
+
+TEST_F(SundialLeaseCoherenceTest, CommitTsFromMultipleReadsAndWrites) {
+    // Simulate a transaction that reads from multiple tuples and writes to one
+    // commit_ts = max(max_wts_in_read_set + 1, max_rts_in_write_set + 1)
+    
+    // Create additional tuples for multi-access scenario
+    SundialTuple tuple2, tuple3;
+    tuple2.set_wts(50);   tuple2.set_rts(60);
+    tuple3.set_wts(200);  tuple3.set_rts(250);  // This has the highest wts
+    
+    // Transaction reads from tuple_ (wts=100), tuple2 (wts=50), tuple3 (wts=200)
+    sundial::timestamp_t max_wts_read = 0;
+    
+    // Read tuple_
+    sundial::timestamp_t wts1 = tuple_.get_wts();  // 100
+    max_wts_read = std::max(max_wts_read, wts1);
+    
+    // Read tuple2
+    sundial::timestamp_t wts2 = tuple2.get_wts();  // 50
+    max_wts_read = std::max(max_wts_read, wts2);
+    
+    // Read tuple3
+    sundial::timestamp_t wts3 = tuple3.get_wts();  // 200
+    max_wts_read = std::max(max_wts_read, wts3);
+    
+    EXPECT_EQ(max_wts_read, 200ULL);
+    
+    // Transaction writes to tuple_ (rts=100)
+    sundial::timestamp_t max_rts_write = tuple_.get_rts();  // 100
+    
+    // Compute commit_ts: max(200+1, 100+1) = 201
+    sundial::timestamp_t commit_ts = sundial::compute_commit_ts(max_wts_read, max_rts_write);
+    EXPECT_EQ(commit_ts, 201ULL);
+}
+
+TEST_F(SundialLeaseCoherenceTest, CommitTsFromWriteSetDominates) {
+    // Test case where write set's rts dominates the commit_ts calculation
+    
+    SundialTuple tuple2;
+    tuple2.set_wts(50);
+    tuple2.set_rts(300);  // High rts
+    
+    // Transaction reads tuple_ (wts=100) and writes to tuple2 (rts=300)
+    sundial::timestamp_t max_wts_read = tuple_.get_wts();  // 100
+    sundial::timestamp_t max_rts_write = tuple2.get_rts(); // 300
+    
+    // Compute commit_ts: max(100+1, 300+1) = 301
+    sundial::timestamp_t commit_ts = sundial::compute_commit_ts(max_wts_read, max_rts_write);
+    EXPECT_EQ(commit_ts, 301ULL);
+}
+
 // ============================================================================
 // Integration Test: Simulated Transaction Flow
 // ============================================================================
@@ -609,7 +641,6 @@ TEST_F(SundialLeaseCoherenceTest, SimulatedReadWriteTransaction) {
     // Read phase: observe wts and rts
     sundial::timestamp_t observed_wts = tuple_.get_wts();
     sundial::timestamp_t observed_rts = tuple_.get_rts();
-    SUNDIAL_STAT_INC(reads);
     
     // Track max values for commit_ts calculation
     sundial::timestamp_t max_wts_read = observed_wts;
@@ -618,13 +649,11 @@ TEST_F(SundialLeaseCoherenceTest, SimulatedReadWriteTransaction) {
     // Write phase: acquire lock
     EXPECT_TRUE(tuple_.try_sundial_lock(my_thread_id));
     max_rts_write = std::max(max_rts_write, tuple_.get_rts());
-    SUNDIAL_STAT_INC(writes);
     
     // Compute commit_ts
     sundial::timestamp_t commit_ts = sundial::compute_commit_ts(max_wts_read, max_rts_write);
     
     // Validation phase: check that reads are still valid
-    SUNDIAL_STAT_INC(wts_validations);
     bool valid = sundial::can_extend_lease(tuple_.get_wts(), observed_wts);
     EXPECT_TRUE(valid);
     
@@ -639,7 +668,6 @@ TEST_F(SundialLeaseCoherenceTest, SimulatedReadWriteTransaction) {
         if (commit_ts > tuple_.get_rts()) {
             tuple_.set_rts(commit_ts);
         }
-        SUNDIAL_STAT_INC(commits);
     }
     
     // Release lock
@@ -649,13 +677,6 @@ TEST_F(SundialLeaseCoherenceTest, SimulatedReadWriteTransaction) {
     EXPECT_EQ(tuple_.get_wts(), commit_ts);
     EXPECT_GE(tuple_.get_rts(), commit_ts);
     EXPECT_EQ(tuple_.get_lock_owner(), sundial::NO_LOCK_OWNER);
-    
-    // Verify stats
-    auto& stats = sundial::get_sundial_stats();
-    EXPECT_EQ(stats.reads.load(), 1ULL);
-    EXPECT_EQ(stats.writes.load(), 1ULL);
-    EXPECT_EQ(stats.wts_validations.load(), 1ULL);
-    EXPECT_EQ(stats.commits.load(), 1ULL);
 }
 
 // ============================================================================
@@ -665,7 +686,6 @@ TEST_F(SundialLeaseCoherenceTest, SimulatedReadWriteTransaction) {
 class WaitDiePolicyTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        sundial::get_sundial_stats().reset();
     }
 };
 
@@ -693,7 +713,6 @@ protected:
     SundialTuple tuple_;
     
     void SetUp() override {
-        sundial::get_sundial_stats().reset();
     }
 };
 
@@ -833,20 +852,6 @@ TEST_F(WaitDieTimestampTest, ConcurrentWaitDieSimulation) {
     
     // Lock should be released at the end
     EXPECT_EQ(tuple_.get_lock_owner(), sundial::NO_LOCK_OWNER);
-}
-
-TEST_F(WaitDieTimestampTest, StatisticsCountNewMetrics) {
-    // Verify new stats counters exist and work
-    auto& stats = sundial::get_sundial_stats();
-    
-    SUNDIAL_STAT_INC(waits);
-    SUNDIAL_STAT_INC(waits);
-    SUNDIAL_STAT_INC(wait_successes);
-    SUNDIAL_STAT_INC(wait_timeouts);
-    
-    EXPECT_EQ(stats.waits.load(), 2ULL);
-    EXPECT_EQ(stats.wait_successes.load(), 1ULL);
-    EXPECT_EQ(stats.wait_timeouts.load(), 1ULL);
 }
 
 // ============================================================================
