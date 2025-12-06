@@ -38,12 +38,19 @@ nohup ./build/simpleTransactionRep 1 0 6 learner 1 > simple-shard0-learner.log 2
 PID_LEARNER=$!
 
 # Wait for experiments to run
+# The leader runs tests (~20-25s), sends end signals, then followers need time to:
+# 1. Receive all replication logs
+# 2. Receive end signals (6 partitions = 6 signals)
+# 3. Run verification tests on replicated data (~10-15s)
+# Total: ~50-60s on fast systems, longer on slower VMs
 echo "Running experiments"
-sleep 40
+sleep 60
 
-# Kill ALL processes
+# Kill ALL processes - use SIGTERM first for graceful shutdown
 echo "Stopping shards..."
-kill $PID_LOCALHOST $PID_LEARNER $PID_P2 $PID_P1 2>/dev/null
+kill -TERM $PID_LOCALHOST $PID_LEARNER $PID_P2 $PID_P1 2>/dev/null
+sleep 5  # Give processes time to flush logs and finish verification
+kill -9 $PID_LOCALHOST $PID_LEARNER $PID_P2 $PID_P1 2>/dev/null
 wait $PID_LOCALHOST $PID_LEARNER $PID_P2 $PID_P1 2>/dev/null
 
 echo ""
