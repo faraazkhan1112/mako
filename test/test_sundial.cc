@@ -1,17 +1,17 @@
 /**
- * Sundial Protocol Unit Tests - Phase 1
+ * Sundial Protocol Unit Tests
  * 
- * Tests the Sundial logical lease implementation.
+ * Tests the Sundial logical lease implementation (VLDB 2018).
  * 
  * Coverage:
  * 1. SundialConfig utility functions (timestamps, lease operations)
  * 2. Atomic lease field operations (wts, rts, lock_owner)
  * 3. Sundial locking operations (try_lock, unlock, is_locked_by)
  * 4. Lease extension (extend_rts)
- * 5. Wait-Die policy
+ * 5. Wait-Die policy for deadlock prevention
  * 
- * Note: This test uses a standalone SundialTuple mock to avoid STO framework
- * dependencies while still validating the core Sundial mechanisms.
+ * Note: Uses a standalone SundialTuple mock to avoid STO framework
+ * dependencies while validating core Sundial mechanisms.
  */
 
 #include <gtest/gtest.h>
@@ -35,7 +35,7 @@ struct SundialTuple {
     std::atomic<sundial::timestamp_t> wts_{0};
     std::atomic<sundial::timestamp_t> rts_{0};
     std::atomic<sundial::thread_id_t> lock_owner_{sundial::NO_LOCK_OWNER};
-    std::atomic<sundial::timestamp_t> lock_holder_ts_{0};  // Phase 2a: Lock holder's timestamp
+    std::atomic<sundial::timestamp_t> lock_holder_ts_{0};  // Lock holder's timestamp for Wait-Die
     
     // Lease getters/setters
     sundial::timestamp_t get_wts() const {
@@ -65,7 +65,7 @@ struct SundialTuple {
         return current_rts;
     }
     
-    // Lock operations (Phase 2a: with timestamp support)
+    // Lock operations with timestamp support for Wait-Die
     sundial::thread_id_t get_lock_owner() const {
         return lock_owner_.load(std::memory_order_acquire);
     }
@@ -705,7 +705,7 @@ TEST_F(WaitDiePolicyTest, SameAgeTransactionShouldDie) {
 }
 
 // ============================================================================
-// Phase 2a: Wait-Die with Timestamp Support Tests
+// Wait-Die with Timestamp Support Tests
 // ============================================================================
 
 class WaitDieTimestampTest : public ::testing::Test {
@@ -853,10 +853,6 @@ TEST_F(WaitDieTimestampTest, ConcurrentWaitDieSimulation) {
     // Lock should be released at the end
     EXPECT_EQ(tuple_.get_lock_owner(), sundial::NO_LOCK_OWNER);
 }
-
-// ============================================================================
-// Main
-// ============================================================================
 
 int main(int argc, char **argv) {
     ::testing::InitGoogleTest(&argc, argv);

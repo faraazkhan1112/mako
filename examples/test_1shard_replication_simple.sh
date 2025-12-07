@@ -19,14 +19,14 @@ rm -rf /tmp/${USERNAME}_mako_rocksdb_shard*
 echo "Starting shard 0..."
 
 # 1. Start leader first
-nohup ./build/simpleTransactionRep 1 0 6 localhost 1 > simple-shard0-localhost.log 2>&1 &
+nohup ./build/simpleTransactionRep 1 0 2 localhost 1 > simple-shard0-localhost.log 2>&1 &
 PID_LOCALHOST=$!
 
 # 2. Start followers
-nohup ./build/simpleTransactionRep 1 0 6 p2 1 > simple-shard0-p2.log 2>&1 &
+nohup ./build/simpleTransactionRep 1 0 2 p2 1 > simple-shard0-p2.log 2>&1 &
 PID_P2=$!
 sleep 1
-nohup ./build/simpleTransactionRep 1 0 6 p1 1  > simple-shard0-p1.log 2>&1 &
+nohup ./build/simpleTransactionRep 1 0 2 p1 1  > simple-shard0-p1.log 2>&1 &
 PID_P1=$!
 
 # 3. Wait for leader to fully initialize and start sending heartbeats
@@ -34,7 +34,7 @@ PID_P1=$!
 sleep 8
 
 # 4. Start learner LAST - after leader is definitely sending heartbeats
-nohup ./build/simpleTransactionRep 1 0 6 learner 1 > simple-shard0-learner.log 2>&1 &
+nohup ./build/simpleTransactionRep 1 0 2 learner 1 > simple-shard0-learner.log 2>&1 &
 PID_LEARNER=$!
 
 # Wait for experiments to run

@@ -1,0 +1,37 @@
+=========================================
+Sundial Replicated Benchmark Results
+=========================================
+Mode: sundial_readonly
+Date: Sat Dec  6 07:58:27 PM EST 2025
+Threads: 2
+Shards: 1
+Topology: 1 Leader + 2 Followers + 1 Learner
+Replication: Paxos (Multi-Paxos)
+=========================================
+
+--- Benchmark Statistics ---
+runtime: 45.7978 sec
+n_commits: 1571289
+agg_throughput: 34309.3 ops/sec
+avg_per_core_throughput: 17154.6 ops/sec/core
+agg_persist_throughput: 34309.3 ops/sec
+avg_latency: 0.0576266 ms
+agg_abort_rate: 4.78189 aborts/sec
+
+--- Transaction Latencies ---
+  NewOrder_local_commit_latency: 0.0494119 ms
+  OrderStatus_local_commit_latency: 0.00989278 ms
+  StockLevel_local_commit_latency: 0.108308 ms
+
+--- Abort Ratios ---
+  NewOrder_local_abort_ratio: 3.16586e-05
+  OrderStatus_local_abort_ratio: 0
+  StockLevel_local_abort_ratio: 0.000302735
+
+--- Remote Transaction Stats ---
+  NewOrder_remote_ratio: 0 %
+  NewOrder_remote_abort_ratio: -nan %
+
+=========================================
+Full benchmark output saved in: sundial_readonly_replicated_localhost.log
+=========================================

@@ -217,7 +217,9 @@ static unsigned g_txn_workload_mix[] = { 100, 0, 0, 0, 0 };
 #elif defined(SIMPLE_WORKLOAD) || defined(MEGA_BENCHMARK_MICRO)
 static unsigned g_txn_workload_mix[] = { 50, 50, 0, 0, 0 };
 #else
-static unsigned g_txn_workload_mix[] = { 45, 43, 4, 4, 4 }; // default TPC-C workload mix
+// Default TPC-C workload mix: [NewOrder, Payment, Delivery, OrderStatus, StockLevel]
+// For read-heavy testing, temporarily change to: { 10, 0, 0, 45, 45 } (90% read-only)
+static unsigned g_txn_workload_mix[] = { 45, 43, 4, 4, 4 };
 #endif
 static aligned_padded_elem<spinlock> *g_partition_locks = nullptr;
 static aligned_padded_elem<atomic<uint64_t>> *g_district_ids = nullptr;
