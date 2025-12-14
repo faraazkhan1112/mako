@@ -1,3 +1,14 @@
+## Sundial Integration
+
+This fork implements ideas from the **Sundial** paper (*"Sundial: Harmonizing Concurrency Control and Caching in a Distributed OLTP Database Management System"*, VLDB 2018) into Mako. Specifically, we implemented Sundial's **logical leases** (wts/rts timestamps), **Wait-Die deadlock prevention**, and **read-only fast path optimization**.
+
+- [SUNDIAL_IMPLEMENTATION.md](SUNDIAL_IMPLEMENTATION.md) - Implementation details
+- [SUNDIAL_EVALUATION.md](SUNDIAL_EVALUATION.md) - Benchmark results
+
+To toggle Sundial on/off, modify the `SUNDIAL_ENABLED` flag in [SundialConfig.hh](src/mako/benchmarks/sto/SundialConfig.hh) and rebuild.
+
+---
+
 # Mako
 
 <div align="center">

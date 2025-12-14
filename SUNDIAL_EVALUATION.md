@@ -34,7 +34,9 @@ The script runs the benchmark **5 times** and computes the average for:
 - Latency (ms)
 - Abort rate (aborts/sec)
 
-Results are saved to `<mode>_tpccresults.txt`.
+Results are saved to `<mode>_tpccresults.txt`:
+- [baseline_tpccresults.txt](baseline_tpccresults.txt)
+- [sundial_tpccresults.txt](sundial_tpccresults.txt)
 
 ### Results
 
@@ -103,7 +105,9 @@ Where `<mode>` is:
 - `baseline` - Sundial disabled
 - `sundial` - Sundial enabled with Wait-Die optimization
 
-Results are saved to `<mode>_replication_results.txt`.
+Results are saved to `<mode>_replication_results.txt`:
+- [baseline_replication_results.txt](baseline_replication_results.txt)
+- [sundial_replication_results.txt](sundial_replication_results.txt)
 
 ### Results
 
@@ -155,36 +159,16 @@ Results are saved to `<mode>_replication_results.txt`.
 
 ### Analysis
 
-**Note on Absolute Throughput**: The throughput numbers here (~17-20K ops/sec) are lower than Section 1 (~125K ops/sec) for two reasons:
-1. **Reduced thread count** (2 vs 6) due to VM CPU limitations
-2. **Paxos replication overhead** - each transaction requires consensus across 4 nodes
+**Note**: Throughput here (~17-20K ops/sec) is lower than Section 1 (~125K ops/sec) due to reduced threads (2 vs 6) and Paxos overhead.
 
-The important comparison is the **relative difference** between baseline and Sundial within this section.
+**Wait-Die Mechanism** (from Sundial paper): For write-write conflicts, older transactions **wait** for locks while younger transactions **abort immediately**. This is a deadlock prevention strategy.
 
-1. **Abort Rate Reduction (-30.4%)**: The most significant result. Sundial's Wait-Die deadlock prevention allows older transactions to **wait** for lock holders instead of immediately aborting. This reduces wasted work from aborts and retries.
+1. **Abort Rate (-30.4%)**: Older transactions wait instead of aborting. Write-heavy transactions benefit most:
+   - NewOrder: −41%, Payment: −65%
 
-2. **Throughput Decrease (-14.5%)**: This is the expected tradeoff of Wait-Die semantics. Older transactions spin-wait for locks instead of aborting, which:
-   - Reduces parallelism (threads spend time waiting)
-   - But ensures forward progress for older transactions
+2. **Throughput (-14.5%)** and **Latency (+16.4%)**: The cost of waiting. Threads blocked on locks reduce parallelism. Write transactions show larger latency increases (+17-28%) than read transactions (+5-7%) since Wait-Die applies to write locks.
 
-3. **Latency Increase (+16.4%)**: Directly caused by Wait-Die spin-waiting. Transactions that previously would abort immediately now wait, increasing their completion time.
-
-4. **Per-Transaction Analysis**:
-   - **NewOrder/Payment** (88% of workload): Abort ratios dropped ~40-65%, showing Wait-Die benefits for write-heavy transactions
-   - **OrderStatus**: Abort ratio went from 0.0031% to **0%** - read-only transactions benefit from reduced contention
-   - **StockLevel**: Similar abort ratio - already low due to read-only nature
-
-### Trade-off Summary
-
-| Aspect | Wait-Die Effect |
-|--------|-----------------|
-| Aborts | ✓ Significantly reduced |
-| Throughput | ✗ Lower due to waiting |
-| Latency | ✗ Higher due to waiting |
-| Deadlocks | ✓ Prevented by design |
-| Forward Progress | ✓ Guaranteed for older transactions |
-
-The Wait-Die optimization is ideal for workloads where **abort cost is high** (e.g., complex multi-table transactions, distributed transactions with network overhead). For simple local transactions, the baseline OCC may perform better.
+**Trade-off**: Wait-Die reduces aborts at the cost of throughput/latency. This may benefit workloads where abort cost is high.
 
 ---
 
@@ -215,7 +199,9 @@ Where `<mode>` is:
 - `sundial_readonly` - Sundial enabled with Read-Only Fast Path
 - `baseline_readonly` - Sundial disabled (standard OCC)
 
-Results are saved to `<mode>_replication_results.txt`.
+Results are saved to `<mode>_replication_results.txt`:
+- [baseline_readonly_replication_results.txt](baseline_readonly_replication_results.txt)
+- [sundial_readonly_replication_results.txt](sundial_readonly_replication_results.txt)
 
 ### Results
 
@@ -263,36 +249,132 @@ Results are saved to `<mode>_replication_results.txt`.
 
 ### Analysis
 
-1. **Throughput Improvement (+9.6%)**: This is the most significant result. Sundial's read-only fast path allows transactions that:
-   - Have no writes (`sundial_read_only_ == true`)
-   - Access data within valid leases (`commit_ts <= min_rts`)
-   
-   To **skip phase 2 validation entirely**. With 90% read-only transactions, this optimization has substantial impact.
+**Read-Only Fast Path**: When a transaction is read-only and `commit_ts <= min_rts` (all reads are within valid lease periods), validation can be skipped.
 
-2. **Latency Reduction (-8.9%)**: Directly caused by skipping validation. Read-only transactions complete faster because they bypass the OCC validation phase when leases are valid.
+1. **Throughput (+9.6%)** and **Latency (-8.9%)**: With 90% read-only transactions, skipping validation has significant impact. Per-transaction latencies:
+   - OrderStatus: −11.6%, StockLevel: −6.8% (read-only, benefit from fast path)
+   - NewOrder: −22.3% (write transaction, benefits from reduced system contention)
 
-3. **Abort Rate Increase (+12.2%)**: Sundial's enhanced conflict detection via `wts` tracking identifies more conflicts than baseline OCC. This is a correctness feature - Sundial detects modifications that baseline might miss during the validation window.
+2. **Abort Rate (+12.2%)**: The increase comes from NewOrder (0.0014% → 0.0032%), not read-only transactions. Sundial's `wts` tracking provides stricter conflict detection for write transactions.
 
-4. **Per-Transaction Analysis**:
-   - **OrderStatus**: Latency dropped from 0.0112ms to **0.0099ms** (-11.6%) - pure read-only benefit
-   - **StockLevel**: Latency dropped from 0.1162ms to **0.1083ms** (-6.8%) - read-only optimization working
-   - **NewOrder**: Latency dropped from 0.0636ms to **0.0494ms** (-22.3%) - mixed benefit from reduced system contention
+---
 
-### Why Read-Only Fast Path Works
+## 4. Multi-Shard With Replication Benchmark
 
-The Sundial paper states:
-> *"A read-only transaction can commit locally without remote validation if its commit timestamp does not exceed the minimum lease end time (rts) of all tuples it read."*
+This benchmark evaluates Sundial's behavior in a **multi-shard distributed environment** with Paxos replication, testing cross-shard transaction coordination.
 
-Our implementation in `Transaction.cc`:
-```cpp
-if (sundial_can_use_read_only_fast_path()) {
-    // Skip phase 2 validation - go directly to commit
-    stop(true, nullptr, 0);
-    return true;
-}
+### Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| Topology | 2 Shards, each with 4 Paxos nodes (1 leader, 2 followers, 1 learner) |
+| Workload | Standard TPC-C [45% NewOrder, 43% Payment, 4% Delivery, 4% OrderStatus, 4% StockLevel] |
+| Threads | 2 per shard |
+| Replication | Multi-Paxos per shard |
+| Cross-Shard | TPC-C remote warehouse transactions via RPC |
+
+**Note on Thread Count**: We use 2 threads per shard due to VM CPU limitations. Running 8 Paxos processes (4 per shard × 2 shards) simultaneously creates significant CPU contention.
+
+**Note on Cross-Shard Transactions**: In TPC-C, NewOrder and Payment transactions may access remote warehouses (on different shards). These transactions require cross-shard coordination via 2PC-style RPC calls.
+
+### Evaluation Script
+
+```bash
+./examples/benchmark_multishard.sh <prefix>
 ```
 
-When `commit_ts <= min_rts`, all read tuples are guaranteed to remain valid (no concurrent modifications during the lease period), eliminating the need for validation.
+Where `<prefix>` is:
+- `multishard_baseline` - Sundial disabled
+- `multishard_sundial` - Sundial enabled with Wait-Die and Read-Only optimizations
+
+Results are saved to `<prefix>_results.txt`:
+- [multishard_baseline_results.txt](multishard_baseline_results.txt)
+- [multishard_sundial_results.txt](multishard_sundial_results.txt)
+
+### Results
+
+#### Baseline (Sundial Disabled)
+
+| Metric | Shard 0 | Shard 1 |
+|--------|---------|---------|
+| **Throughput** | 830.21 ops/sec | 841.77 ops/sec |
+| **Persist Throughput** | 830.21 ops/sec | 841.77 ops/sec |
+| **Avg Latency** | 0.282 ms | 0.271 ms |
+| **Abort Rate** | 0.40 aborts/sec | 0.71 aborts/sec |
+| **Remote Abort Ratio** | 0.00% | 0.12% |
+
+**Combined Throughput: ~1,672 ops/sec**
+
+#### Sundial (Wait-Die + Read-Only Optimizations)
+
+| Metric | Shard 0 | Shard 1 |
+|--------|---------|---------|
+| **Throughput** | 884.08 ops/sec | 870.87 ops/sec |
+| **Persist Throughput** | 884.08 ops/sec | 870.87 ops/sec |
+| **Avg Latency** | 0.236 ms | 0.238 ms |
+| **Abort Rate** | 1.58 aborts/sec | 1.55 aborts/sec |
+| **Remote Abort Ratio** | 0.73% | 0.35% |
+
+**Combined Throughput: ~1,755 ops/sec**
+
+#### Comparison Summary
+
+| Metric | Baseline | Sundial | Difference |
+|--------|----------|---------|------------|
+| **Shard 0 Throughput** | 830.21 ops/sec | 884.08 ops/sec | **+6.5%** |
+| **Shard 1 Throughput** | 841.77 ops/sec | 870.87 ops/sec | **+3.5%** |
+| **Combined Throughput** | ~1,672 ops/sec | ~1,755 ops/sec | **+5.0%** |
+| **Shard 0 Latency** | 0.282 ms | 0.236 ms | **-16.3%** (improvement) |
+| **Shard 1 Latency** | 0.271 ms | 0.238 ms | **-12.2%** (improvement) |
+| **Avg Latency** | 0.277 ms | 0.237 ms | **-14.4%** (improvement) |
+| **Shard 0 Abort Rate** | 0.40 aborts/sec | 1.58 aborts/sec | +295% |
+| **Shard 1 Abort Rate** | 0.71 aborts/sec | 1.55 aborts/sec | +118% |
+| **Total Abort Rate** | 1.11 aborts/sec | 3.13 aborts/sec | +182% |
+| **Shard 0 Remote Abort Ratio** | 0.00% | 0.73% | +0.73% |
+| **Shard 1 Remote Abort Ratio** | 0.12% | 0.35% | +0.23% |
+
+### Analysis
+
+Sundial statistics from a verification run reveal:
+
+| Statistic | Value | Meaning |
+|-----------|-------|---------|
+| Lock conflicts | 1 in ~4M writes | Wait-Die never triggered |
+| WTS conflicts | 0 in ~1.3M validations | No read-write conflicts detected |
+| RO fast path | ~50% of read-only txns | Skipping validation |
+
+**Key Finding**: The multi-shard workload has very low contention. Transactions rarely conflict on the same tuples, so:
+- Wait-Die's waiting/aborting logic doesn't execute
+- WTS validation always passes
+- **Read-only fast path is the primary source of improvement**
+
+The throughput and latency gains come from read-only transactions skipping validation, not from Wait-Die or WTS conflict handling.
+
+### How STO-Layer Changes Help Multi-Shard
+
+Our Sundial changes are in the **STO (local transaction) layer**. Each shard runs these optimizations independently:
+
+| Change | Location | Multi-Shard Benefit |
+|--------|----------|---------------------|
+| **wts/rts on tuples** | versioned_value.hh | Conflict detection per shard; replicated automatically by Paxos |
+| **Wait-Die locks** | MassTrans.hh | Prevents local deadlocks; older transactions wait, younger abort |
+| **Read-Only Fast Path** | Transaction.cc | Skips validation when `commit_ts <= min_rts` |
+| **Commit wts/rts update** | MassTrans.hh | Updates leases on commit; included in Paxos replication |
+
+**Example - Cross-Shard NewOrder**:
+```
+Shard 0 (Coordinator)              Shard 1 (Participant)
+┌─────────────────────┐            ┌─────────────────────┐
+│ 1. Read Customer    │    RPC     │ 3. Read/Write Stock │
+│    (track wts/rts)  │ ─────────► │    (Wait-Die lock)  │
+│ 2. Write Order      │            │    (track wts/rts)  │
+│    (Wait-Die lock)  │            │                     │
+│ 4. 2PC Prepare/Commit ─────────► │ 5. Commit           │
+│    (update wts/rts) │            │    (update wts/rts) │
+└─────────────────────┘            └─────────────────────┘
+```
+
+Each shard's local transaction processing is more efficient → cross-shard transactions complete faster. The 2PC coordination layer is **unchanged**.
 
 ---
 
@@ -300,94 +382,42 @@ When `commit_ts <= min_rts`, all read tuples are guaranteed to remain valid (no 
 
 ### Summary of Results
 
-Our Sundial implementation demonstrates three key behaviors across different configurations:
-
-| Benchmark | Throughput Impact | Latency Impact | Abort Rate Impact | Key Insight |
-|-----------|------------------|----------------|-------------------|-------------|
-| **Single-Shard (No Replication)** | +1.83% | -2.07% | +9.93% | Minimal overhead |
-| **Replicated + Wait-Die** | -14.5% | +16.4% | **-30.4%** | Reduced aborts via waiting |
-| **Replicated + Read-Only Opt** | **+9.6%** | **-8.9%** | +12.2% | Fast path for read-only txns |
+| Benchmark | Throughput | Latency | Abort Rate | Key Insight |
+|-----------|------------|---------|------------|-------------|
+| **Section 1**: Single-Shard | +1.83% | -2.07% | +9.93% | Minimal overhead |
+| **Section 2**: Replicated + Wait-Die | -14.5% | +16.4% | -30.4% | Wait-Die trades throughput for fewer aborts |
+| **Section 3**: Replicated + Read-Only | +9.6% | -8.9% | +12.2% | Fast path skips validation |
+| **Section 4**: Multi-Shard | +5.0% | -14.4% | +182% | Low contention, read-only fast path helps |
 
 ### Key Findings
 
-1. **Minimal Base Overhead**: Sundial's timestamp tracking (wts/rts) introduces less than 2% overhead in the baseline case, making it suitable for production use.
+1. **Minimal Overhead**: Sundial's wts/rts tracking adds less than 2% overhead.
 
-2. **Wait-Die Trade-off**: The Wait-Die optimization trades throughput for abort reduction. This is beneficial when:
-   - Abort cost is high (complex transactions, network overhead)
-   - Deadlock prevention is critical
-   - Forward progress guarantees are needed
+2. **Wait-Die Trade-off**: Older transactions wait, younger abort immediately. In Section 2, this reduced aborts by 30% at the cost of throughput/latency.
 
-3. **Read-Only Fast Path Success**: The read-only optimization delivers **9.6% throughput improvement** for read-heavy workloads by skipping validation when leases are valid.
+3. **Read-Only Fast Path**: Skips validation when `commit_ts <= min_rts`. Delivers 9.6% throughput improvement in read-heavy workloads.
+
+4. **Multi-Shard Reality**: Sundial statistics show very low contention (1 lock conflict in 4M writes, 0 WTS conflicts). Wait-Die rarely triggers. **Read-only fast path is the primary source of improvement**.
 
 ### Implementation Correctness
 
 The implementation follows the Sundial paper (VLDB 2018):
-- ✅ **wts/rts tracking** for logical lease management on each tuple
-- ✅ **Wait-Die 2PL** for write-write conflict resolution (older waits, younger aborts)
-- ✅ **OCC validation** with wts comparison for read-write conflicts
-- ✅ **Read-Only Fast Path** skipping validation when `commit_ts <= min_rts`
-- ✅ **Dynamic commit timestamp** computation as `max(max_read_wts, max_write_rts) + 1`
+- ✅ wts/rts tracking on each tuple
+- ✅ Wait-Die 2PL for write-write conflicts
+- ✅ OCC validation with wts comparison
+- ✅ Read-Only Fast Path when `commit_ts <= min_rts`
+- ✅ Dynamic commit timestamp computation
 
-### Trade-offs and Limitations
+### Limitations
 
-#### Trade-offs
-
-| Feature | Benefit | Cost |
-|---------|---------|------|
-| **Timestamp Tracking** | Enhanced conflict detection | Memory overhead (16 bytes per tuple for wts/rts) |
-| **Wait-Die** | Reduced aborts, no deadlocks | Lower throughput, higher latency from waiting |
-| **Read-Only Fast Path** | Faster read-only transactions | Requires accurate lease tracking |
-
-#### Limitations of Testing
-
-1. **VM Resource Constraints**: All benchmarks ran on a resource-limited VM, necessitating:
-   - Reduced thread count (2 instead of 6) for replicated tests
-   - Extended timeouts (180s) for benchmark completion
-   - Results may not reflect performance on production hardware
-
-2. **Single-Node Testing**: All Paxos nodes run on localhost. Real distributed deployments would have:
-   - Network latency between nodes
-   - Different failure modes
-   - Potentially different contention patterns
-
-3. **Synthetic Workload**: TPC-C is a standard benchmark but may not represent all real-world workloads. The 90% read-only mix for read-heavy testing is artificial.
-
-4. **Limited Scale**: Testing with 1 shard and 1-2 warehouses. Production systems would have:
-   - Multiple shards with cross-shard transactions
-   - Larger data sets
-   - More concurrent clients
-
-### Possible Evaluation in the Future:
-
-1. **Distributed Deployment**: Deploy on separate physical machines to measure network effects
-3. **Longer Runs**: Execute 5-10 minute benchmarks for stability analysis
-4. **Variable Contention**: Test with different contention levels (more threads, more warehouses)
-5. **Failure Scenarios**: Test behavior during Paxos leader failover
-
-### Replication Verification
-
-All replicated benchmarks (Sections 2 and 3) successfully ran with Paxos replication enabled:
-
-| Run | is_replicated | Paxos Nodes | Verification |
-|-----|---------------|-------------|--------------|
-| Sundial + Wait-Die | ✅ Yes | 4 (leader, p1, p2, learner) | ForwardToLearner messages in logs |
-| Baseline | ✅ Yes | 4 (leader, p1, p2, learner) | ForwardToLearner messages in logs |
-| Sundial + Read-Only | ✅ Yes | 4 (leader, p1, p2, learner) | ForwardToLearner messages in logs |
-| Baseline Read-Only | ✅ Yes | 4 (leader, p1, p2, learner) | ForwardToLearner messages in logs |
-
-Log evidence confirms:
-- Each run created 4 separate process logs (localhost, p1, p2, learner)
-- Paxos consensus messages (`ForwardToLearner: slot=1,2,3...`) visible in follower logs
-- All nodes successfully connected and participated in consensus
+1. **VM Constraints**: 2 threads instead of 6, all Paxos nodes on localhost
+2. **Low Contention**: TPC-C workload has few conflicts, so Wait-Die/WTS validation rarely trigger
+3. **Synthetic Workload**: Results may differ with real-world workloads
 
 ### Overall Assessment
 
-Despite the testing limitations, the evaluation demonstrates that our Sundial implementation:
-
-1. **Works correctly** - Timestamp tracking and conflict detection behave as specified
-2. **Introduces acceptable overhead** - Less than 2% in the baseline case
-3. **Provides measurable benefits** - 30% abort reduction (Wait-Die) and 9.6% throughput improvement (Read-Only)
-4. **Follows the paper** - Implementation aligns with the Sundial protocol design
-5. **Integrates with Paxos** - All replicated tests successfully ran with Multi-Paxos consensus
-
-The evaluation provides sufficient evidence that the implementation is **functional, performant, correctly implements the Sundial protocol, and works correctly with Paxos replication**.
+The Sundial implementation:
+- **Works correctly** with Paxos replication
+- **Introduces minimal overhead** (<2%)
+- **Read-only fast path provides measurable benefit** (+9.6% throughput)
+- **Wait-Die and WTS validation** are implemented but rarely trigger in low-contention workloads

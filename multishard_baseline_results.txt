@@ -1,0 +1,43 @@
+=========================================
+MULTI-SHARD BENCHMARK RESULTS
+=========================================
+Output prefix: multishard_baseline
+Timestamp: Sun Dec 14 02:08:46 AM EST 2025
+Threads per shard: 2
+Configuration: 2 shards, each with 3 replicas + 1 learner
+=========================================
+
+=== Shard 0 Results ===
+Status: COMPLETED
+
+Throughput:
+agg_throughput: 830.211 ops/sec
+agg_persist_throughput: 830.211 ops/sec
+
+Abort Rate:
+agg_abort_rate: 0.401456 aborts/sec
+  NewOrder_remote_abort_ratio: 0 %
+
+Latency:
+avg_latency: 0.282439 ms
+
+=== Shard 1 Results ===
+Status: COMPLETED
+
+Throughput:
+agg_throughput: 841.771 ops/sec
+agg_persist_throughput: 841.771 ops/sec
+
+Abort Rate:
+agg_abort_rate: 0.710382 aborts/sec
+  NewOrder_remote_abort_ratio: 0.120627 %
+
+Latency:
+avg_latency: 0.271302 ms
+
+=== Sundial Statistics (if enabled) ===
+(Sundial statistics not found - SUNDIAL_STATS may be disabled)
+
+=========================================
+Benchmark complete!
+=========================================
