@@ -302,4 +302,4 @@ Caching integration is deferred to future work. The architectural changes requir
 
 **Papers:**
 - Sundial: "Sundial: Harmonizing Concurrency Control and Caching in a Distributed OLTP Database Management System" (VLDB 2018)
-- Mako: "Mako: Speculatively Replicated Distributed Transactions" (EuroSys 2021)
+- Mako: "Mako: Speculative Distributed Transactions with Geo-Replication" (OSDI 2025)
