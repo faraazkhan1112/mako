@@ -4,6 +4,20 @@ This document contains the evaluation plan and results for our Sundial implement
 
 ---
 
+## Hardware Environment
+
+All experiments were run on a VirtualBox VM with the following specifications:
+
+| Resource | Value |
+|----------|-------|
+| CPU | 4 cores |
+| RAM | 10 GB |
+| Network | All nodes on localhost |
+
+Due to limited CPU resources, we use 2 threads for replicated benchmarks (instead of 6) to avoid CPU contention when running multiple Paxos processes simultaneously.
+
+---
+
 ## 1. Single-Shard No Replication Benchmark
 
 This benchmark measures the raw transaction processing performance of a single-shard TPC-C workload without Paxos replication.
