@@ -244,15 +244,6 @@ Our Sundial changes are in the **STO layer** (local transaction processing). Thi
 
 We evaluated our Sundial implementation with several benchmarks. See [SUNDIAL_EVALUATION.md](SUNDIAL_EVALUATION.md) for detailed results.
 
-### Summary of Results
-
-| Benchmark | Throughput | Latency | Abort Rate | Key Finding |
-|-----------|------------|---------|------------|-------------|
-| Single-Shard (no replication) | +1.83% | -2.07% | +9.93% | Minimal overhead |
-| Single-Shard + Wait-Die | -14.5% | +16.4% | -30.4% | Wait-Die trades throughput for fewer aborts |
-| Single-Shard + Read-Only Fast Path | +9.6% | -8.9% | +12.2% | Fast path helps read-heavy workloads |
-| Multi-Shard | +5.0% | -14.4% | +182% | Low contention, read-only fast path is main benefit |
-
 ### Key Observations
 
 1. **Logical leases work correctly** - wts/rts tracking and validation function as expected
@@ -298,7 +289,7 @@ When Shard B updates data, Shard A's cache becomes stale. Mako's Paxos replicati
 
 ### 6.4 Our Prototype
 
-We created a cache prototype in [SundialCache.hh](src/mako/benchmarks/sto/SundialCache.hh) with the data structures needed. It is **not integrated** due to the challenges above.
+We created a cache prototype in [SundialCache.hh](src/mako/benchmarks/sto/SundialCache.hh) with the data structures needed. It is **not integrated** yet due to the challenges above.
 
 ### 6.5 Conclusion
 
@@ -312,8 +303,3 @@ Caching integration is deferred to future work. The architectural changes requir
 **Papers:**
 - Sundial: "Sundial: Harmonizing Concurrency Control and Caching in a Distributed OLTP Database Management System" (VLDB 2018)
 - Mako: "Mako: Speculatively Replicated Distributed Transactions" (EuroSys 2021)
-
-**Project Files:**
-- [SUNDIAL_EVALUATION.md](SUNDIAL_EVALUATION.md) - Benchmark results
-- [SundialCache.hh](src/mako/benchmarks/sto/SundialCache.hh) - Cache prototype
-- [SundialConfig.hh](src/mako/benchmarks/sto/SundialConfig.hh) - Configuration and utilities

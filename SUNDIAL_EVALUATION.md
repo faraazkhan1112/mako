@@ -374,7 +374,7 @@ Shard 0 (Coordinator)              Shard 1 (Participant)
 └─────────────────────┘            └─────────────────────┘
 ```
 
-Each shard's local transaction processing is more efficient → cross-shard transactions complete faster. The 2PC coordination layer is **unchanged**.
+Each shard's local transaction processing is more efficient → cross-shard transactions complete faster.
 
 ---
 
