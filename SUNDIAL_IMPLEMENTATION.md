@@ -212,6 +212,13 @@ if (sundial_can_use_read_only_fast_path()) {
 | `SUNDIAL_DEBUG` | Enable verbose debug logging |
 | `SUNDIAL_STATS` | Enable statistics collection (printed at exit) |
 
+**Viewing Sundial Metrics**: When `SUNDIAL_STATS=1`, detailed statistics are automatically printed to stderr at program exit. These include:
+- `Reads/Writes tracked` - Number of operations instrumented with lease tracking
+- `WTS validations/conflicts` - How often wts changed between read and commit (indicates write conflicts)
+- `Lock conflicts` - Write-write conflicts where younger transaction aborted (Wait-Die "die" events)
+- `Wait-Die waits/successes/timeouts` - Older transactions that waited for locks
+- `RO fast path/slow path` - Read-only transactions that skipped vs. required OCC validation
+
 To run different configurations, modify these flags in `SundialConfig.hh` and rebuild.
 
 ---

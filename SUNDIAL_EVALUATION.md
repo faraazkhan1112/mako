@@ -349,6 +349,8 @@ Results are saved to `<prefix>_results.txt`:
 
 ### Analysis
 
+**Note**: To see detailed Sundial metrics, ensure `SUNDIAL_STATS=1` in `SundialConfig.hh`. Statistics are printed to stderr at program exit.
+
 Sundial statistics from a verification run reveal:
 
 | Statistic | Value | Meaning |
